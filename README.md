@@ -196,4 +196,4 @@ RUST_LOG=ecommerce_inventory=info,tower_http=info
 
 ## License
 
-MIT (or replace with your preferred license).
+MIT License.
