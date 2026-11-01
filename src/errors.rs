@@ -5,9 +5,6 @@ use axum::{
 };
 use serde_json::json;
 
-/// Centralized application error type. Every handler returns `Result<T, AppError>`
-/// so that all failure modes (DB errors, validation errors, not-found, business rule
-/// violations like insufficient stock) map to a consistent JSON error response.
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
     #[error("resource not found: {0}")]
@@ -26,6 +23,9 @@ pub enum AppError {
     #[error("invalid order state: {0}")]
     InvalidState(String),
 
+    #[error("unauthorized: {0}")]
+    Unauthorized(String),
+
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
 
@@ -40,6 +40,7 @@ impl IntoResponse for AppError {
             AppError::Validation(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
             AppError::InsufficientStock { .. } => (StatusCode::CONFLICT, self.to_string()),
             AppError::InvalidState(msg) => (StatusCode::CONFLICT, msg.clone()),
+            AppError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, msg.clone()),
             AppError::Database(e) => {
                 tracing::error!(error = ?e, "database error");
                 (

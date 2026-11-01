@@ -19,17 +19,33 @@ async fn main() -> anyhow::Result<()> {
     let bind_addr =
         std::env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
 
+    let admin_api_key = std::env::var("ADMIN_API_KEY")
+        .map_err(|_| anyhow::anyhow!("ADMIN_API_KEY environment variable must be set"))?;
+    if admin_api_key.len() < 16 {
+        anyhow::bail!(
+            "ADMIN_API_KEY must be at least 16 characters (got {})",
+            admin_api_key.len()
+        );
+    }
+
+    let cors_origins: Vec<String> = std::env::var("CORS_ALLOWED_ORIGINS")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect();
+
     let pool = db::create_pool(&database_url).await?;
     tracing::info!("database pool created");
 
     run_migrations(&pool).await?;
     tracing::info!("database migrations applied");
 
-    // Background sweeper: cancels pending orders older than 15 minutes and restores stock.
     jobs::cancel_pending::spawn(pool.clone());
     tracing::info!("background stale-order sweeper started (runs every 60s)");
 
-    let app = build_app(pool);
+    let app = build_app(pool, admin_api_key, cors_origins);
 
     let addr: SocketAddr = bind_addr.parse().expect("invalid BIND_ADDR");
     tracing::info!(%addr, "starting server");

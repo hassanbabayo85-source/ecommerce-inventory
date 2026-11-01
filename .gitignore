@@ -1,1 +1,24 @@
+# Rust
+/target
+**/*.rs.bk
+
+# Cargo lockfile is COMMITTED for binary crates (see README for policy)
+# (so we do NOT ignore Cargo.lock)
+
+# Secrets
 .env
+.env.local
+*.pem
+*.key
+
+# Audit artifacts (not for commit)
+audit_*.txt
+
+# Editor/OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Logs
+*.log

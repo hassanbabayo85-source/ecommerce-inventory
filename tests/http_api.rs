@@ -3,9 +3,6 @@ mod common;
 use serde_json::json;
 use std::net::SocketAddr;
 
-/// Spins up the real Axum app on an ephemeral local port so tests exercise the actual HTTP
-/// layer (routing, JSON (de)serialization, status codes) rather than calling db:: functions
-/// directly. Returns the base URL to send requests to.
 async fn spawn_app() -> String {
     let pool = common::setup_pool().await;
     let app = common::app(pool);
@@ -25,9 +22,10 @@ async fn full_product_and_order_http_flow() {
     let base = spawn_app().await;
     let client = reqwest::Client::new();
 
-    // Create a product.
+    // Create a product (admin — needs X-API-Key).
     let resp = client
         .post(format!("{base}/api/products"))
+        .header("x-api-key", common::TEST_API_KEY)
         .json(&json!({
             "name": "HTTP Test Widget",
             "sku": "HTTP-001",
@@ -42,13 +40,13 @@ async fn full_product_and_order_http_flow() {
     let product: serde_json::Value = resp.json().await.unwrap();
     let product_id = product["id"].as_str().unwrap().to_string();
 
-    // List products includes it.
+    // List products includes it (public).
     let resp = client.get(format!("{base}/api/products")).send().await.unwrap();
     assert_eq!(resp.status(), 200);
     let products: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(products.as_array().unwrap().len(), 1);
 
-    // Create an order for 4 units.
+    // Create an order for 4 units (public).
     let resp = client
         .post(format!("{base}/api/orders"))
         .json(&json!({
@@ -64,13 +62,13 @@ async fn full_product_and_order_http_flow() {
     assert_eq!(order["status"], "pending");
     assert_eq!(order["total_amount"], "100.00");
 
-    // Stock dropped to 1, which is <= low_stock_threshold (2) -> should show in low-stock report.
+    // Low-stock report (public).
     let resp = client.get(format!("{base}/api/products/low-stock")).send().await.unwrap();
     let low_stock: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(low_stock.as_array().unwrap().len(), 1);
     assert_eq!(low_stock[0]["stock_quantity"], 1);
 
-    // Ordering more than the remaining 1 unit fails with 409.
+    // Ordering more than the remaining 1 unit fails with 409 (public).
     let resp = client
         .post(format!("{base}/api/orders"))
         .json(&json!({
@@ -82,9 +80,10 @@ async fn full_product_and_order_http_flow() {
         .unwrap();
     assert_eq!(resp.status(), 409);
 
-    // Pay the first order.
+    // Pay the first order (admin).
     let resp = client
         .post(format!("{base}/api/orders/{order_id}/pay"))
+        .header("x-api-key", common::TEST_API_KEY)
         .send()
         .await
         .unwrap();
@@ -92,14 +91,14 @@ async fn full_product_and_order_http_flow() {
     let paid: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(paid["status"], "paid");
 
-    // Fetch full order detail with items.
+    // Fetch full order detail with items (public).
     let resp = client.get(format!("{base}/api/orders/{order_id}")).send().await.unwrap();
     assert_eq!(resp.status(), 200);
     let full_order: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(full_order["items"].as_array().unwrap().len(), 1);
     assert_eq!(full_order["items"][0]["quantity"], 4);
 
-    // Fetching a non-existent order returns 404.
+    // Fetching a non-existent order returns 404 (public).
     let resp = client
         .get(format!("{base}/api/orders/00000000-0000-0000-0000-000000000000"))
         .send()
@@ -115,6 +114,7 @@ async fn creating_product_with_negative_price_is_rejected() {
 
     let resp = client
         .post(format!("{base}/api/products"))
+        .header("x-api-key", common::TEST_API_KEY)
         .json(&json!({
             "name": "Bad Product",
             "sku": "BAD-001",

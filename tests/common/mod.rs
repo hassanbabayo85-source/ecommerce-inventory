@@ -2,6 +2,9 @@ use ecommerce_inventory::{build_app, db, models::product::CreateProductRequest, 
 use rust_decimal::Decimal;
 use sqlx::PgPool;
 
+/// The API key used by all tests hitting admin endpoints.
+pub const TEST_API_KEY: &str = "test-admin-key-1234567890";
+
 /// Connects to the test database (set TEST_DATABASE_URL, falls back to DATABASE_URL) and
 /// makes sure migrations are applied. Each test truncates the tables it touches at the start
 /// so tests stay independent even though they share one database/pool.
@@ -22,7 +25,7 @@ pub async fn setup_pool() -> PgPool {
 }
 
 pub fn app(pool: PgPool) -> axum::Router {
-    build_app(pool)
+    build_app(pool, TEST_API_KEY.to_string(), vec![])
 }
 
 pub async fn seed_product(pool: &PgPool, name: &str, sku: &str, price: &str, stock: i32) -> uuid::Uuid {
