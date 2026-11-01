@@ -4,21 +4,72 @@ use rust_decimal::Decimal;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-pub async fn create_product(pool: &PgPool, req: CreateProductRequest) -> AppResult<Product> {
-    if req.name.trim().is_empty() {
+/// Maps a database error from a product INSERT/UPDATE to a user-facing `AppError`.
+///
+/// Distinguishes by SQLSTATE (fixes C4 from audit):
+///   - 23505 = unique_violation → "sku already exists"
+///   - 23514 = check_violation  → generic constraint message (price>=0, stock>=0, threshold>=0)
+/// Anything else is treated as an internal DB error.
+fn map_product_db_error(e: sqlx::Error, sku: &str) -> AppError {
+    if let sqlx::Error::Database(ref db_err) = e {
+        match db_err.code().as_deref() {
+            Some("23505") => {
+                return AppError::Validation(format!("sku '{}' already exists", sku));
+            }
+            Some("23514") => {
+                return AppError::Validation(format!(
+                    "database check violation: {}",
+                    db_err.message()
+                ));
+            }
+            _ => {}
+        }
+    }
+    AppError::Database(e)
+}
+
+/// Validates fields about to be written to a product row.
+/// `name` and `sku` must be non-empty; numeric fields must be non-negative.
+/// (Fixes C2 and C3 from audit.)
+fn validate_product_fields(
+    name: &str,
+    sku: &str,
+    price: Decimal,
+    stock_quantity: i32,
+    low_stock_threshold: i32,
+) -> AppResult<()> {
+    if name.trim().is_empty() {
         return Err(AppError::Validation("name must not be empty".into()));
     }
-    if req.sku.trim().is_empty() {
+    if sku.trim().is_empty() {
         return Err(AppError::Validation("sku must not be empty".into()));
     }
-    if req.price < Decimal::ZERO {
+    if price < Decimal::ZERO {
         return Err(AppError::Validation("price must not be negative".into()));
     }
-    if req.stock_quantity < 0 {
+    if stock_quantity < 0 {
         return Err(AppError::Validation(
             "stock_quantity must not be negative".into(),
         ));
     }
+    if low_stock_threshold < 0 {
+        return Err(AppError::Validation(
+            "low_stock_threshold must not be negative".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub async fn create_product(pool: &PgPool, req: CreateProductRequest) -> AppResult<Product> {
+    let low_stock_threshold = req.low_stock_threshold.unwrap_or(5);
+
+    validate_product_fields(
+        &req.name,
+        &req.sku,
+        req.price,
+        req.stock_quantity,
+        low_stock_threshold,
+    )?;
 
     let product = sqlx::query_as::<_, Product>(
         r#"
@@ -31,15 +82,10 @@ pub async fn create_product(pool: &PgPool, req: CreateProductRequest) -> AppResu
     .bind(&req.sku)
     .bind(req.price)
     .bind(req.stock_quantity)
-    .bind(req.low_stock_threshold.unwrap_or(5))
+    .bind(low_stock_threshold)
     .fetch_one(pool)
     .await
-    .map_err(|e| match &e {
-        sqlx::Error::Database(db_err) if db_err.constraint().is_some() => {
-            AppError::Validation(format!("sku '{}' already exists", req.sku))
-        }
-        _ => AppError::Database(e),
-    })?;
+    .map_err(|e| map_product_db_error(e, &req.sku))?;
 
     Ok(product)
 }
@@ -74,30 +120,72 @@ pub async fn get_product(pool: &PgPool, id: Uuid) -> AppResult<Product> {
     Ok(product)
 }
 
+/// Partially updates a product row.
+///
+/// Correctness (fixes C1 from audit): read + write happen inside ONE transaction with
+/// `SELECT ... FOR UPDATE`. Without this, a concurrent `create_order` could decrement
+/// `stock_quantity` in the window between our read and our write, and our stale write
+/// would silently resurrect the sold stock.
 pub async fn update_product(
     pool: &PgPool,
     id: Uuid,
     req: UpdateProductRequest,
 ) -> AppResult<Product> {
-    // Load current row first so we can apply partial updates and validate.
-    let current = get_product(pool, id).await?;
+    // Pre-checks on incoming fields (avoids opening a transaction just to fail).
+    if let Some(ref n) = req.name {
+        if n.trim().is_empty() {
+            return Err(AppError::Validation("name must not be empty".into()));
+        }
+    }
+    if let Some(ref s) = req.sku {
+        if s.trim().is_empty() {
+            return Err(AppError::Validation("sku must not be empty".into()));
+        }
+    }
+    if let Some(p) = req.price {
+        if p < Decimal::ZERO {
+            return Err(AppError::Validation("price must not be negative".into()));
+        }
+    }
+    if let Some(q) = req.stock_quantity {
+        if q < 0 {
+            return Err(AppError::Validation(
+                "stock_quantity must not be negative".into(),
+            ));
+        }
+    }
+    if let Some(t) = req.low_stock_threshold {
+        if t < 0 {
+            return Err(AppError::Validation(
+                "low_stock_threshold must not be negative".into(),
+            ));
+        }
+    }
+
+    let mut tx = pool.begin().await?;
+
+    // Row-level lock: concurrent orders/updates block here until we commit.
+    let current = sqlx::query_as::<_, Product>(
+        r#"
+        SELECT id, name, sku, price, stock_quantity, low_stock_threshold, created_at, updated_at
+        FROM products
+        WHERE id = $1
+        FOR UPDATE
+        "#,
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| AppError::NotFound(format!("product {id} not found")))?;
 
     let name = req.name.unwrap_or(current.name);
     let sku = req.sku.unwrap_or(current.sku);
     let price = req.price.unwrap_or(current.price);
     let stock_quantity = req.stock_quantity.unwrap_or(current.stock_quantity);
-    let low_stock_threshold = req
-        .low_stock_threshold
-        .unwrap_or(current.low_stock_threshold);
+    let low_stock_threshold = req.low_stock_threshold.unwrap_or(current.low_stock_threshold);
 
-    if price < Decimal::ZERO {
-        return Err(AppError::Validation("price must not be negative".into()));
-    }
-    if stock_quantity < 0 {
-        return Err(AppError::Validation(
-            "stock_quantity must not be negative".into(),
-        ));
-    }
+    // Belt-and-braces: revalidate merged values.
+    validate_product_fields(&name, &sku, price, stock_quantity, low_stock_threshold)?;
 
     let product = sqlx::query_as::<_, Product>(
         r#"
@@ -114,10 +202,11 @@ pub async fn update_product(
     .bind(stock_quantity)
     .bind(low_stock_threshold)
     .bind(id)
-    .fetch_optional(pool)
-    .await?
-    .ok_or_else(|| AppError::NotFound(format!("product {id} not found")))?;
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| map_product_db_error(e, &sku))?;
 
+    tx.commit().await?;
     Ok(product)
 }
 

@@ -203,6 +203,8 @@ pub async fn cancel_stale_pending_orders(
         SELECT id FROM orders
         WHERE status = 'pending'
           AND created_at < now() - ($1 || ' minutes')::interval
+        ORDER BY created_at ASC
+        LIMIT 1000
         "#,
     )
     .bind(timeout_minutes.to_string())
