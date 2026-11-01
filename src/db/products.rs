@@ -90,18 +90,34 @@ pub async fn create_product(pool: &PgPool, req: CreateProductRequest) -> AppResu
     Ok(product)
 }
 
-pub async fn list_products(pool: &PgPool) -> AppResult<Vec<Product>> {
+/// Lists products with pagination.
+///
+/// Returns `(products, total_count)` where `total_count` is the total number of
+/// products in the table (ignoring pagination), suitable for the `X-Total-Count`
+/// response header. `limit` is clamped by the caller (handler) to [1, 200].
+pub async fn list_products(
+    pool: &PgPool,
+    limit: i64,
+    offset: i64,
+) -> AppResult<(Vec<Product>, i64)> {
+    let total: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM products")
+        .fetch_one(pool)
+        .await?;
+
     let products = sqlx::query_as::<_, Product>(
         r#"
         SELECT id, name, sku, price, stock_quantity, low_stock_threshold, created_at, updated_at
         FROM products
-        ORDER BY created_at DESC
+        ORDER BY created_at DESC, id ASC
+        LIMIT $1 OFFSET $2
         "#,
     )
+    .bind(limit)
+    .bind(offset)
     .fetch_all(pool)
     .await?;
 
-    Ok(products)
+    Ok((products, total.0))
 }
 
 pub async fn get_product(pool: &PgPool, id: Uuid) -> AppResult<Product> {
@@ -182,7 +198,9 @@ pub async fn update_product(
     let sku = req.sku.unwrap_or(current.sku);
     let price = req.price.unwrap_or(current.price);
     let stock_quantity = req.stock_quantity.unwrap_or(current.stock_quantity);
-    let low_stock_threshold = req.low_stock_threshold.unwrap_or(current.low_stock_threshold);
+    let low_stock_threshold = req
+        .low_stock_threshold
+        .unwrap_or(current.low_stock_threshold);
 
     // Belt-and-braces: revalidate merged values.
     validate_product_fields(&name, &sku, price, stock_quantity, low_stock_threshold)?;

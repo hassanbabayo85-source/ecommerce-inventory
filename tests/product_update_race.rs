@@ -15,24 +15,25 @@ use uuid::Uuid;
 /// After the fix, both operations take `SELECT ... FOR UPDATE`, so they serialize
 /// on the product row and the final stock is always 7 regardless of interleaving.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
 async fn concurrent_order_and_update_never_resurrect_stock() {
     let pool = common::setup_pool().await;
 
-    let product_id: Uuid = common::seed_product(
-        &pool,
-        "Update Race Widget",
-        "UPD-RACE-001",
-        "5.00",
-        10,
-    )
-    .await;
+    let product_id: Uuid =
+        common::seed_product(&pool, "Update Race Widget", "UPD-RACE-001", "5.00", 10).await;
 
     let rounds: usize = 15;
 
     for round in 0..rounds {
         // Reset state for this round: stock=10, no orders.
-        sqlx::query("DELETE FROM order_items").execute(&pool).await.unwrap();
-        sqlx::query("DELETE FROM orders").execute(&pool).await.unwrap();
+        sqlx::query("DELETE FROM order_items")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM orders")
+            .execute(&pool)
+            .await
+            .unwrap();
         sqlx::query("UPDATE products SET stock_quantity = 10 WHERE id = $1")
             .bind(product_id)
             .execute(&pool)

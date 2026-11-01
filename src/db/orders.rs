@@ -1,7 +1,5 @@
 use crate::errors::{AppError, AppResult};
-use crate::models::order::{
-    CreateOrderRequest, Order, OrderItem, OrderStatus, OrderWithItems,
-};
+use crate::models::order::{CreateOrderRequest, Order, OrderItem, OrderStatus, OrderWithItems};
 use rust_decimal::Decimal;
 use sqlx::PgPool;
 use std::collections::BTreeMap;
@@ -56,16 +54,14 @@ pub async fn create_order(pool: &PgPool, req: CreateOrderRequest) -> AppResult<O
     for (product_id, quantity) in &merged {
         // Row-level lock: blocks concurrent transactions from reading/decrementing this
         // product's stock until we commit or roll back.
-        let row: Option<(Decimal, i32)> = sqlx::query_as(
-            "SELECT price, stock_quantity FROM products WHERE id = $1 FOR UPDATE",
-        )
-        .bind(product_id)
-        .fetch_optional(&mut *tx)
-        .await?;
+        let row: Option<(Decimal, i32)> =
+            sqlx::query_as("SELECT price, stock_quantity FROM products WHERE id = $1 FOR UPDATE")
+                .bind(product_id)
+                .fetch_optional(&mut *tx)
+                .await?;
 
-        let (price, available) = row.ok_or_else(|| {
-            AppError::NotFound(format!("product {product_id} not found"))
-        })?;
+        let (price, available) =
+            row.ok_or_else(|| AppError::NotFound(format!("product {product_id} not found")))?;
 
         if available < *quantity {
             // Returning here drops `tx` without calling commit(), which rolls the
@@ -193,10 +189,47 @@ pub async fn pay_order(pool: &PgPool, id: Uuid) -> AppResult<Order> {
 /// one transaction per order so a crash mid-way never leaves stock permanently "lost".
 ///
 /// Returns the ids of orders that were cancelled.
+/// Advisory lock key — arbitrary fixed i64.
+///
+/// Prevents more than one instance from running the sweep at the same time.
+/// `pg_try_advisory_lock` is non-blocking: if another worker holds the lock we
+/// simply skip this tick and try again 60s later.
+///
+/// Acquired and released on the *same* pool connection (advisory locks are
+/// per-session in Postgres), so we hold one connection from the pool during
+/// the sweep. With max_connections >= 2 this leaves headroom for business
+/// queries; we document the >= 2 requirement in README.
+const SWEEP_ADVISORY_LOCK_ID: i64 = 0x4543_4F4D_4D45_5243;
+
+/// Background-job entry point. Wraps `do_sweep` with a cross-instance advisory lock.
 pub async fn cancel_stale_pending_orders(
     pool: &PgPool,
     timeout_minutes: i64,
 ) -> AppResult<Vec<Uuid>> {
+    let mut conn = pool.acquire().await?;
+
+    let got: (bool,) = sqlx::query_as("SELECT pg_try_advisory_lock($1)")
+        .bind(SWEEP_ADVISORY_LOCK_ID)
+        .fetch_one(&mut *conn)
+        .await?;
+
+    if !got.0 {
+        tracing::debug!("another instance holds the sweep advisory lock; skipping this tick");
+        return Ok(Vec::new());
+    }
+
+    let result = do_sweep(pool, timeout_minutes).await;
+
+    // Always release, even if do_sweep failed. Ignore unlock errors.
+    let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(SWEEP_ADVISORY_LOCK_ID)
+        .execute(&mut *conn)
+        .await;
+
+    result
+}
+
+async fn do_sweep(pool: &PgPool, timeout_minutes: i64) -> AppResult<Vec<Uuid>> {
     // Find candidate order ids outside the per-order transaction (cheap, read-only).
     let stale_ids: Vec<(Uuid,)> = sqlx::query_as(
         r#"
@@ -235,12 +268,11 @@ pub async fn cancel_stale_pending_orders(
             continue;
         }
 
-        let items: Vec<(Uuid, i32)> = sqlx::query_as(
-            "SELECT product_id, quantity FROM order_items WHERE order_id = $1",
-        )
-        .bind(order_id)
-        .fetch_all(&mut *tx)
-        .await?;
+        let items: Vec<(Uuid, i32)> =
+            sqlx::query_as("SELECT product_id, quantity FROM order_items WHERE order_id = $1")
+                .bind(order_id)
+                .fetch_all(&mut *tx)
+                .await?;
 
         // Lock product rows in sorted order (same deadlock-avoidance rule as create_order).
         let mut sorted_items = items;

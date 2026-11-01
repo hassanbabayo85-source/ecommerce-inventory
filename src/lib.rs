@@ -30,9 +30,10 @@ pub fn build_app(pool: PgPool, admin_api_key: String, cors_origins: Vec<String>)
         admin_api_key,
     };
 
-    let admin = handlers::admin_routes().route_layer(
-        axum::middleware::from_fn_with_state(state.clone(), auth::require_admin),
-    );
+    let admin = handlers::admin_routes().route_layer(axum::middleware::from_fn_with_state(
+        state.clone(),
+        auth::require_admin,
+    ));
 
     Router::new()
         .merge(handlers::public_routes())

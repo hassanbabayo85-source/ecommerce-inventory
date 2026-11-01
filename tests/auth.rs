@@ -11,13 +11,16 @@ async fn spawn_app() -> String {
     let addr: SocketAddr = listener.local_addr().unwrap();
 
     tokio::spawn(async move {
-        axum::serve(listener, app.into_make_service()).await.unwrap();
+        axum::serve(listener, app.into_make_service())
+            .await
+            .unwrap();
     });
 
     format!("http://{addr}")
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn admin_route_rejects_missing_api_key() {
     let base = spawn_app().await;
     let client = reqwest::Client::new();
@@ -33,10 +36,15 @@ async fn admin_route_rejects_missing_api_key() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 401, "admin route must return 401 without X-API-Key");
+    assert_eq!(
+        resp.status(),
+        401,
+        "admin route must return 401 without X-API-Key"
+    );
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn admin_route_rejects_invalid_api_key() {
     let base = spawn_app().await;
     let client = reqwest::Client::new();
@@ -53,10 +61,15 @@ async fn admin_route_rejects_invalid_api_key() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 401, "admin route must reject wrong X-API-Key");
+    assert_eq!(
+        resp.status(),
+        401,
+        "admin route must reject wrong X-API-Key"
+    );
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn admin_route_accepts_valid_api_key() {
     let base = spawn_app().await;
     let client = reqwest::Client::new();
@@ -73,15 +86,24 @@ async fn admin_route_accepts_valid_api_key() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 201, "admin route must accept valid X-API-Key");
+    assert_eq!(
+        resp.status(),
+        201,
+        "admin route must accept valid X-API-Key"
+    );
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn public_routes_do_not_require_api_key() {
     let base = spawn_app().await;
     let client = reqwest::Client::new();
 
-    let resp = client.get(format!("{base}/api/products")).send().await.unwrap();
+    let resp = client
+        .get(format!("{base}/api/products"))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200, "GET /api/products must be public");
 
     let resp = client.get(format!("{base}/health")).send().await.unwrap();
@@ -89,6 +111,7 @@ async fn public_routes_do_not_require_api_key() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn pay_endpoint_requires_api_key() {
     let base = spawn_app().await;
     let client = reqwest::Client::new();

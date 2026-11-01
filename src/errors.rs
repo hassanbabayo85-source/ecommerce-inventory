@@ -13,7 +13,9 @@ pub enum AppError {
     #[error("validation error: {0}")]
     Validation(String),
 
-    #[error("insufficient stock for product {product_id}: requested {requested}, available {available}")]
+    #[error(
+        "insufficient stock for product {product_id}: requested {requested}, available {available}"
+    )]
     InsufficientStock {
         product_id: uuid::Uuid,
         requested: i32,

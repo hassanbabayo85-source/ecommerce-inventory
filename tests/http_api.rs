@@ -11,13 +11,16 @@ async fn spawn_app() -> String {
     let addr: SocketAddr = listener.local_addr().unwrap();
 
     tokio::spawn(async move {
-        axum::serve(listener, app.into_make_service()).await.unwrap();
+        axum::serve(listener, app.into_make_service())
+            .await
+            .unwrap();
     });
 
     format!("http://{addr}")
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn full_product_and_order_http_flow() {
     let base = spawn_app().await;
     let client = reqwest::Client::new();
@@ -41,7 +44,11 @@ async fn full_product_and_order_http_flow() {
     let product_id = product["id"].as_str().unwrap().to_string();
 
     // List products includes it (public).
-    let resp = client.get(format!("{base}/api/products")).send().await.unwrap();
+    let resp = client
+        .get(format!("{base}/api/products"))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200);
     let products: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(products.as_array().unwrap().len(), 1);
@@ -63,7 +70,11 @@ async fn full_product_and_order_http_flow() {
     assert_eq!(order["total_amount"], "100.00");
 
     // Low-stock report (public).
-    let resp = client.get(format!("{base}/api/products/low-stock")).send().await.unwrap();
+    let resp = client
+        .get(format!("{base}/api/products/low-stock"))
+        .send()
+        .await
+        .unwrap();
     let low_stock: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(low_stock.as_array().unwrap().len(), 1);
     assert_eq!(low_stock[0]["stock_quantity"], 1);
@@ -92,7 +103,11 @@ async fn full_product_and_order_http_flow() {
     assert_eq!(paid["status"], "paid");
 
     // Fetch full order detail with items (public).
-    let resp = client.get(format!("{base}/api/orders/{order_id}")).send().await.unwrap();
+    let resp = client
+        .get(format!("{base}/api/orders/{order_id}"))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200);
     let full_order: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(full_order["items"].as_array().unwrap().len(), 1);
@@ -100,7 +115,9 @@ async fn full_product_and_order_http_flow() {
 
     // Fetching a non-existent order returns 404 (public).
     let resp = client
-        .get(format!("{base}/api/orders/00000000-0000-0000-0000-000000000000"))
+        .get(format!(
+            "{base}/api/orders/00000000-0000-0000-0000-000000000000"
+        ))
         .send()
         .await
         .unwrap();
@@ -108,6 +125,7 @@ async fn full_product_and_order_http_flow() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn creating_product_with_negative_price_is_rejected() {
     let base = spawn_app().await;
     let client = reqwest::Client::new();

@@ -16,8 +16,7 @@ async fn main() -> anyhow::Result<()> {
 
     let database_url =
         std::env::var("DATABASE_URL").expect("DATABASE_URL environment variable must be set");
-    let bind_addr =
-        std::env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
+    let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
 
     let admin_api_key = std::env::var("ADMIN_API_KEY")
         .map_err(|_| anyhow::anyhow!("ADMIN_API_KEY environment variable must be set"))?;
@@ -51,7 +50,38 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(%addr, "starting server");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app.into_make_service()).await?;
 
+    axum::serve(listener, app.into_make_service())
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+
+    tracing::info!("server shut down cleanly");
     Ok(())
+}
+
+/// Resolves on SIGINT or SIGTERM so the server can drain in-flight requests
+/// before exiting. Required for clean Docker / Kubernetes rollouts.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => tracing::info!("SIGINT received"),
+        _ = terminate => tracing::info!("SIGTERM received"),
+    }
+    tracing::info!("draining in-flight requests...");
 }

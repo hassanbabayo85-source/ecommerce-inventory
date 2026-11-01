@@ -1,14 +1,22 @@
 use axum::{
-    extract::{Path, State},
-    http::StatusCode,
+    extract::{Path, Query, State},
+    http::{header::HeaderName, HeaderValue, StatusCode},
+    response::{IntoResponse, Response},
     Json,
 };
+use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::db;
 use crate::errors::AppResult;
 use crate::models::product::{CreateProductRequest, Product, UpdateProductRequest};
 use crate::AppState;
+
+#[derive(Debug, Deserialize)]
+pub struct PaginationParams {
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
 
 pub async fn create_product(
     State(state): State<AppState>,
@@ -18,9 +26,27 @@ pub async fn create_product(
     Ok((StatusCode::CREATED, Json(product)))
 }
 
-pub async fn list_products(State(state): State<AppState>) -> AppResult<Json<Vec<Product>>> {
-    let products = db::products::list_products(&state.pool).await?;
-    Ok(Json(products))
+pub async fn list_products(
+    State(state): State<AppState>,
+    Query(params): Query<PaginationParams>,
+) -> AppResult<Response> {
+    let limit = params.limit.unwrap_or(50).clamp(1, 200);
+    let offset = params.offset.unwrap_or(0).max(0);
+
+    let (products, total) = db::products::list_products(&state.pool, limit, offset).await?;
+
+    let mut resp = Json(products).into_response();
+    resp.headers_mut().insert(
+        HeaderName::from_static("x-total-count"),
+        HeaderValue::from(total),
+    );
+    resp.headers_mut()
+        .insert(HeaderName::from_static("x-limit"), HeaderValue::from(limit));
+    resp.headers_mut().insert(
+        HeaderName::from_static("x-offset"),
+        HeaderValue::from(offset),
+    );
+    Ok(resp)
 }
 
 pub async fn get_product(

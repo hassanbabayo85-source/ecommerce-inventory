@@ -10,6 +10,7 @@ use std::sync::Arc;
 /// rest must fail with InsufficientStock — stock must never go negative and must never be
 /// double-sold. This exercises `SELECT ... FOR UPDATE` row locking inside a DB transaction.
 #[tokio::test]
+#[serial_test::serial]
 async fn concurrent_orders_never_oversell_stock() {
     let pool = common::setup_pool().await;
     let product_id = common::seed_product(&pool, "Race Widget", "RACE-001", "9.99", 5).await;
@@ -52,22 +53,25 @@ async fn concurrent_orders_never_oversell_stock() {
     assert_eq!(failure_count.load(Ordering::SeqCst), 15);
 
     let product = db::products::get_product(&pool, product_id).await.unwrap();
-    assert_eq!(product.stock_quantity, 0, "stock must land exactly at zero, never negative");
+    assert_eq!(
+        product.stock_quantity, 0,
+        "stock must land exactly at zero, never negative"
+    );
 
     // Sanity check: exactly 5 orders exist for this product and each reserved 1 unit.
-    let orders_count: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM order_items WHERE product_id = $1",
-    )
-    .bind(product_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let orders_count: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM order_items WHERE product_id = $1")
+            .bind(product_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(orders_count.0, 5);
 }
 
 /// A failed order (insufficient stock) must not leave any partial state behind: no order row,
 /// no order_items rows, and stock unchanged. Verifies the transaction rollback path.
 #[tokio::test]
+#[serial_test::serial]
 async fn insufficient_stock_rolls_back_cleanly() {
     let pool = common::setup_pool().await;
     let product_id = common::seed_product(&pool, "Scarce Item", "SCARCE-001", "20.00", 2).await;
@@ -83,19 +87,30 @@ async fn insufficient_stock_rolls_back_cleanly() {
     let result = db::orders::create_order(&pool, req).await;
     assert!(matches!(
         result,
-        Err(ecommerce_inventory::errors::AppError::InsufficientStock { requested: 10, available: 2, .. })
+        Err(ecommerce_inventory::errors::AppError::InsufficientStock {
+            requested: 10,
+            available: 2,
+            ..
+        })
     ));
 
     let product = db::products::get_product(&pool, product_id).await.unwrap();
-    assert_eq!(product.stock_quantity, 2, "stock must be untouched after a rolled-back order");
+    assert_eq!(
+        product.stock_quantity, 2,
+        "stock must be untouched after a rolled-back order"
+    );
 
-    let orders_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM orders").fetch_one(&pool).await.unwrap();
+    let orders_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM orders")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(orders_count.0, 0, "no order row should have been persisted");
 }
 
 /// A multi-item order that partially fails (one product has enough stock, another doesn't)
 /// must roll back *both* products' stock, not just the one that failed.
 #[tokio::test]
+#[serial_test::serial]
 async fn multi_item_order_rolls_back_all_products_on_partial_failure() {
     let pool = common::setup_pool().await;
     let plenty_id = common::seed_product(&pool, "Plenty", "PLENTY-001", "5.00", 100).await;
@@ -104,8 +119,14 @@ async fn multi_item_order_rolls_back_all_products_on_partial_failure() {
     let req = CreateOrderRequest {
         customer_email: "buyer@example.com".to_string(),
         items: vec![
-            OrderItemRequest { product_id: plenty_id, quantity: 5 },
-            OrderItemRequest { product_id: scarce_id, quantity: 5 }, // fails: only 1 in stock
+            OrderItemRequest {
+                product_id: plenty_id,
+                quantity: 5,
+            },
+            OrderItemRequest {
+                product_id: scarce_id,
+                quantity: 5,
+            }, // fails: only 1 in stock
         ],
     };
 
@@ -114,6 +135,9 @@ async fn multi_item_order_rolls_back_all_products_on_partial_failure() {
 
     let plenty = db::products::get_product(&pool, plenty_id).await.unwrap();
     let scarce = db::products::get_product(&pool, scarce_id).await.unwrap();
-    assert_eq!(plenty.stock_quantity, 100, "unaffected product's stock must roll back too");
+    assert_eq!(
+        plenty.stock_quantity, 100,
+        "unaffected product's stock must roll back too"
+    );
     assert_eq!(scarce.stock_quantity, 1);
 }
