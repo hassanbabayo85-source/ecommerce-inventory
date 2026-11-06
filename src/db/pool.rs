@@ -10,7 +10,10 @@ pub async fn create_pool(database_url: &str) -> Result<PgPool, sqlx::Error> {
     let max_connections: u32 = std::env::var("DB_MAX_CONNECTIONS")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(10);
+        // C5: background job holds 1 connection (advisory lock) and the
+        // sweep needs another, so we require >= 2 connections.
+        .unwrap_or(10)
+        .max(2);
 
     PgPoolOptions::new()
         .max_connections(max_connections)
