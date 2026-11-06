@@ -9,6 +9,10 @@ use uuid::Uuid;
 /// Distinguishes by SQLSTATE (fixes C4 from audit):
 ///   - 23505 = unique_violation → "sku already exists"
 ///   - 23514 = check_violation  → generic constraint message (price>=0, stock>=0, threshold>=0)
+///
+///
+///
+///
 /// Anything else is treated as an internal DB error.
 fn map_product_db_error(e: sqlx::Error, sku: &str) -> AppError {
     if let sqlx::Error::Database(ref db_err) = e {
@@ -229,6 +233,19 @@ pub async fn update_product(
 }
 
 pub async fn delete_product(pool: &PgPool, id: Uuid) -> AppResult<()> {
+    // C4: refuse deletion if referenced by any order_item. Otherwise Postgres
+    // returns a foreign-key violation (23503), which surfaces as a 500.
+    let refs: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM order_items WHERE product_id = $1")
+        .bind(id)
+        .fetch_one(pool)
+        .await?;
+    if refs.0 > 0 {
+        return Err(AppError::InvalidState(format!(
+            "product {id} cannot be deleted: referenced by {} order item(s); consider soft-delete or archive",
+            refs.0
+        )));
+    }
+
     let result = sqlx::query("DELETE FROM products WHERE id = $1")
         .bind(id)
         .execute(pool)
