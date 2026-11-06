@@ -1,5 +1,7 @@
 use crate::errors::{AppError, AppResult};
-use crate::models::order::{CreateOrderRequest, Order, OrderItem, OrderStatus, OrderWithItems};
+use crate::models::order::{
+    CreateOrderRequest, CreateOrderResponse, Order, OrderItem, OrderStatus, OrderWithItems,
+};
 use rust_decimal::Decimal;
 use sqlx::PgPool;
 use std::collections::BTreeMap;
@@ -7,21 +9,14 @@ use uuid::Uuid;
 
 /// Creates an order and reduces stock atomically.
 ///
-/// Concurrency safety:
-/// 1. Everything runs inside a single DB transaction (`pool.begin()`), so either the whole
-///    operation (stock check + stock decrement + order + order_items) commits, or none of it
-///    does (automatic ROLLBACK on early return / drop of the transaction).
-/// 2. Each product row involved is locked with `SELECT ... FOR UPDATE` *before* we read its
-///    stock. Any other transaction trying to lock the same product row (e.g. a second,
-///    concurrent request buying the last unit) blocks until this transaction commits or rolls
-///    back — so two concurrent requests can never both "see" the same stock and both succeed
-///    when only one unit is available.
-/// 3. Product ids are locked in a fixed, sorted order (by UUID) across the whole order. This
-///    prevents classic deadlocks that would occur if two concurrent orders each contain the
-///    same two products but request their locks in opposite order.
-/// 4. Duplicate product ids within a single order request are merged (quantities summed) before
-///    locking, so we only ever lock/update each row once per transaction.
-pub async fn create_order(pool: &PgPool, req: CreateOrderRequest) -> AppResult<OrderWithItems> {
+/// Concurrency: single tx, `FOR UPDATE` per product row, sorted lock order
+/// (BTreeMap), duplicate product ids merged (checked_add → C3), optional
+/// idempotency key (C6), returns access token exactly once (C1).
+pub async fn create_order(
+    pool: &PgPool,
+    req: CreateOrderRequest,
+    idempotency_key: Option<String>,
+) -> AppResult<CreateOrderResponse> {
     if req.customer_email.trim().is_empty() {
         return Err(AppError::Validation("customer_email is required".into()));
     }
@@ -39,21 +34,31 @@ pub async fn create_order(pool: &PgPool, req: CreateOrderRequest) -> AppResult<O
         }
     }
 
-    // Merge duplicate product ids and lock in a stable (sorted) order to avoid deadlocks.
+    // C6 fast-path: if this key was already used, return the original order.
+    if let Some(ref key) = idempotency_key {
+        if let Some(existing) = load_by_idempotency(pool, key).await? {
+            return Ok(existing);
+        }
+    }
+
+    // C3: checked_add — reject i32 overflow instead of silently wrapping.
     let mut merged: BTreeMap<Uuid, i32> = BTreeMap::new();
     for item in &req.items {
-        *merged.entry(item.product_id).or_insert(0) += item.quantity;
+        let slot = merged.entry(item.product_id).or_insert(0);
+        *slot = slot.checked_add(item.quantity).ok_or_else(|| {
+            AppError::Validation(format!(
+                "quantity for product {} overflows i32",
+                item.product_id
+            ))
+        })?;
     }
 
     let mut tx = pool.begin().await?;
 
     let mut total_amount = Decimal::ZERO;
-    // (product_id, quantity, unit_price)
     let mut line_items: Vec<(Uuid, i32, Decimal)> = Vec::with_capacity(merged.len());
 
     for (product_id, quantity) in &merged {
-        // Row-level lock: blocks concurrent transactions from reading/decrementing this
-        // product's stock until we commit or roll back.
         let row: Option<(Decimal, i32)> =
             sqlx::query_as("SELECT price, stock_quantity FROM products WHERE id = $1 FOR UPDATE")
                 .bind(product_id)
@@ -64,8 +69,6 @@ pub async fn create_order(pool: &PgPool, req: CreateOrderRequest) -> AppResult<O
             row.ok_or_else(|| AppError::NotFound(format!("product {product_id} not found")))?;
 
         if available < *quantity {
-            // Returning here drops `tx` without calling commit(), which rolls the
-            // transaction back automatically — no partial stock decrement is ever persisted.
             return Err(AppError::InsufficientStock {
                 product_id: *product_id,
                 requested: *quantity,
@@ -81,7 +84,7 @@ pub async fn create_order(pool: &PgPool, req: CreateOrderRequest) -> AppResult<O
         r#"
         INSERT INTO orders (customer_email, status, total_amount)
         VALUES ($1, 'pending', $2)
-        RETURNING id, customer_email, status, total_amount, created_at, updated_at
+        RETURNING id, customer_email, status, total_amount, created_at, updated_at, access_token
         "#,
     )
     .bind(&req.customer_email)
@@ -91,11 +94,13 @@ pub async fn create_order(pool: &PgPool, req: CreateOrderRequest) -> AppResult<O
 
     let mut items: Vec<OrderItem> = Vec::with_capacity(line_items.len());
     for (product_id, quantity, unit_price) in line_items {
-        sqlx::query("UPDATE products SET stock_quantity = stock_quantity - $1, updated_at = now() WHERE id = $2")
-            .bind(quantity)
-            .bind(product_id)
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(
+            "UPDATE products SET stock_quantity = stock_quantity - $1, updated_at = now() WHERE id = $2",
+        )
+        .bind(quantity)
+        .bind(product_id)
+        .execute(&mut *tx)
+        .await?;
 
         let item = sqlx::query_as::<_, OrderItem>(
             r#"
@@ -114,15 +119,88 @@ pub async fn create_order(pool: &PgPool, req: CreateOrderRequest) -> AppResult<O
         items.push(item);
     }
 
+    // C6: record idempotency key inside the same transaction.
+    if let Some(ref key) = idempotency_key {
+        sqlx::query("INSERT INTO idempotency_keys (key, order_id) VALUES ($1, $2)")
+            .bind(key)
+            .bind(order.id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| match e {
+                sqlx::Error::Database(ref db_err)
+                    if db_err.code().as_deref() == Some("23505") =>
+                {
+                    AppError::InvalidState(format!(
+                        "concurrent request with the same idempotency key '{}' is in progress; retry shortly",
+                        key
+                    ))
+                }
+                other => AppError::Database(other),
+            })?;
+    }
+
     tx.commit().await?;
 
-    Ok(OrderWithItems { order, items })
+    Ok(CreateOrderResponse {
+        access_token: order.access_token,
+        order,
+        items,
+    })
 }
 
-pub async fn get_order_with_items(pool: &PgPool, id: Uuid) -> AppResult<OrderWithItems> {
+async fn load_by_idempotency(pool: &PgPool, key: &str) -> AppResult<Option<CreateOrderResponse>> {
+    let order_id: Option<(Uuid,)> =
+        sqlx::query_as("SELECT order_id FROM idempotency_keys WHERE key = $1")
+            .bind(key)
+            .fetch_optional(pool)
+            .await?;
+
+    let Some((oid,)) = order_id else {
+        return Ok(None);
+    };
+
     let order = sqlx::query_as::<_, Order>(
         r#"
-        SELECT id, customer_email, status, total_amount, created_at, updated_at
+        SELECT id, customer_email, status, total_amount, created_at, updated_at, access_token
+        FROM orders
+        WHERE id = $1
+        "#,
+    )
+    .bind(oid)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| AppError::NotFound(format!("order {oid} not found")))?;
+
+    let items = sqlx::query_as::<_, OrderItem>(
+        r#"
+        SELECT id, order_id, product_id, quantity, unit_price
+        FROM order_items
+        WHERE order_id = $1
+        ORDER BY id
+        "#,
+    )
+    .bind(oid)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(Some(CreateOrderResponse {
+        access_token: order.access_token,
+        order,
+        items,
+    }))
+}
+
+/// Fetches an order + items, enforcing the access-token requirement (C1).
+/// Returns NotFound on mismatch (not 401) so the endpoint does not leak
+/// whether the order id exists.
+pub async fn get_order_with_items(
+    pool: &PgPool,
+    id: Uuid,
+    access_token: Option<Uuid>,
+) -> AppResult<OrderWithItems> {
+    let order = sqlx::query_as::<_, Order>(
+        r#"
+        SELECT id, customer_email, status, total_amount, created_at, updated_at, access_token
         FROM orders
         WHERE id = $1
         "#,
@@ -131,6 +209,11 @@ pub async fn get_order_with_items(pool: &PgPool, id: Uuid) -> AppResult<OrderWit
     .fetch_optional(pool)
     .await?
     .ok_or_else(|| AppError::NotFound(format!("order {id} not found")))?;
+
+    let authorized = matches!(access_token, Some(tok) if tok == order.access_token);
+    if !authorized {
+        return Err(AppError::NotFound(format!("order {id} not found")));
+    }
 
     let items = sqlx::query_as::<_, OrderItem>(
         r#"
@@ -147,9 +230,6 @@ pub async fn get_order_with_items(pool: &PgPool, id: Uuid) -> AppResult<OrderWit
     Ok(OrderWithItems { order, items })
 }
 
-/// Confirms payment for a pending order (simulation — no real payment gateway).
-/// Uses `SELECT ... FOR UPDATE` on the order row so this can't race with the background
-/// cancellation job trying to cancel the same order at the same time.
 pub async fn pay_order(pool: &PgPool, id: Uuid) -> AppResult<Order> {
     let mut tx = pool.begin().await?;
 
@@ -172,7 +252,7 @@ pub async fn pay_order(pool: &PgPool, id: Uuid) -> AppResult<Order> {
         UPDATE orders
         SET status = 'paid', updated_at = now()
         WHERE id = $1
-        RETURNING id, customer_email, status, total_amount, created_at, updated_at
+        RETURNING id, customer_email, status, total_amount, created_at, updated_at, access_token
         "#,
     )
     .bind(id)
@@ -180,28 +260,11 @@ pub async fn pay_order(pool: &PgPool, id: Uuid) -> AppResult<Order> {
     .await?;
 
     tx.commit().await?;
-
     Ok(order)
 }
 
-/// Background-job helper: finds pending orders older than `timeout_minutes` that have not
-/// been paid, cancels them, and restores the stock that was reserved for them — all inside
-/// one transaction per order so a crash mid-way never leaves stock permanently "lost".
-///
-/// Returns the ids of orders that were cancelled.
-/// Advisory lock key — arbitrary fixed i64.
-///
-/// Prevents more than one instance from running the sweep at the same time.
-/// `pg_try_advisory_lock` is non-blocking: if another worker holds the lock we
-/// simply skip this tick and try again 60s later.
-///
-/// Acquired and released on the *same* pool connection (advisory locks are
-/// per-session in Postgres), so we hold one connection from the pool during
-/// the sweep. With max_connections >= 2 this leaves headroom for business
-/// queries; we document the >= 2 requirement in README.
 const SWEEP_ADVISORY_LOCK_ID: i64 = 0x4543_4F4D_4D45_5243;
 
-/// Background-job entry point. Wraps `do_sweep` with a cross-instance advisory lock.
 pub async fn cancel_stale_pending_orders(
     pool: &PgPool,
     timeout_minutes: i64,
@@ -220,7 +283,6 @@ pub async fn cancel_stale_pending_orders(
 
     let result = do_sweep(pool, timeout_minutes).await;
 
-    // Always release, even if do_sweep failed. Ignore unlock errors.
     let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
         .bind(SWEEP_ADVISORY_LOCK_ID)
         .execute(&mut *conn)
@@ -230,7 +292,6 @@ pub async fn cancel_stale_pending_orders(
 }
 
 async fn do_sweep(pool: &PgPool, timeout_minutes: i64) -> AppResult<Vec<Uuid>> {
-    // Find candidate order ids outside the per-order transaction (cheap, read-only).
     let stale_ids: Vec<(Uuid,)> = sqlx::query_as(
         r#"
         SELECT id FROM orders
@@ -247,12 +308,8 @@ async fn do_sweep(pool: &PgPool, timeout_minutes: i64) -> AppResult<Vec<Uuid>> {
     let mut cancelled = Vec::new();
 
     for (order_id,) in stale_ids {
-        // Each order is cancelled + restocked in its own transaction so one bad order
-        // can't block the rest, and so restore-stock + status-change stay atomic.
         let mut tx = pool.begin().await?;
 
-        // Lock the order row and re-check status: it may have been paid concurrently
-        // between our read above and now.
         let current: Option<(OrderStatus,)> =
             sqlx::query_as("SELECT status FROM orders WHERE id = $1 FOR UPDATE")
                 .bind(order_id)
@@ -263,7 +320,6 @@ async fn do_sweep(pool: &PgPool, timeout_minutes: i64) -> AppResult<Vec<Uuid>> {
             continue;
         };
         if status != OrderStatus::Pending {
-            // Got paid (or already cancelled) in the meantime — nothing to do.
             tx.rollback().await.ok();
             continue;
         }
@@ -274,7 +330,6 @@ async fn do_sweep(pool: &PgPool, timeout_minutes: i64) -> AppResult<Vec<Uuid>> {
                 .fetch_all(&mut *tx)
                 .await?;
 
-        // Lock product rows in sorted order (same deadlock-avoidance rule as create_order).
         let mut sorted_items = items;
         sorted_items.sort_by_key(|(pid, _)| *pid);
 

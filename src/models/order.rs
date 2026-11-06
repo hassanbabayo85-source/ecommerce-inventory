@@ -15,17 +15,16 @@ pub enum OrderStatus {
 
 impl std::fmt::Display for OrderStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
+        f.write_str(match self {
             OrderStatus::Pending => "pending",
             OrderStatus::Paid => "paid",
             OrderStatus::Shipped => "shipped",
             OrderStatus::Cancelled => "cancelled",
-        };
-        write!(f, "{s}")
+        })
     }
 }
 
-#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Order {
     pub id: Uuid,
     pub customer_email: String,
@@ -33,9 +32,14 @@ pub struct Order {
     pub total_amount: Decimal,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+
+    /// Per-order opaque access token. NEVER serialized to JSON via this field —
+    /// it is returned exactly once via `CreateOrderResponse::access_token`.
+    #[serde(skip)]
+    pub access_token: Uuid,
 }
 
-#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct OrderItem {
     pub id: Uuid,
     pub order_id: Uuid,
@@ -44,7 +48,9 @@ pub struct OrderItem {
     pub unit_price: Decimal,
 }
 
-#[derive(Debug, Serialize)]
+/// Full order + items. `#[serde(flatten)]` keeps the JSON shape flat:
+/// `{ id, customer_email, status, total_amount, ..., items: [...] }`.
+#[derive(Debug, Clone, Serialize)]
 pub struct OrderWithItems {
     #[serde(flatten)]
     pub order: Order,
@@ -54,11 +60,26 @@ pub struct OrderWithItems {
 #[derive(Debug, Deserialize)]
 pub struct CreateOrderRequest {
     pub customer_email: String,
-    pub items: Vec<OrderItemRequest>,
+    pub items: Vec<CreateOrderItem>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct OrderItemRequest {
+pub struct CreateOrderItem {
     pub product_id: Uuid,
     pub quantity: i32,
+}
+
+/// Backwards-compatible alias — older code/tests used this name.
+pub type OrderItemRequest = CreateOrderItem;
+
+/// Response body for POST /api/orders.
+///
+/// `access_token` is returned exactly ONCE; clients must store it and send
+/// it as `X-Order-Token` on subsequent GET /api/orders/:id requests.
+#[derive(Debug, Serialize)]
+pub struct CreateOrderResponse {
+    #[serde(flatten)]
+    pub order: Order,
+    pub items: Vec<OrderItem>,
+    pub access_token: Uuid,
 }
