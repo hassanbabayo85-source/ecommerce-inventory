@@ -1,199 +1,230 @@
 # E-commerce Inventory and Order System
 
-A Rust backend for managing **Products**, **Orders**, and **stock/inventory**, built with
-Axum + Tokio + PostgreSQL (sqlx), including a background job that automatically cancels
-unpaid orders and restores stock.
+[![CI](https://github.com/hassanbabayo85-source/ecommerce-inventory/actions/workflows/ci.yml/badge.svg)](https://github.com/hassanbabayo85-source/ecommerce-inventory/actions/workflows/ci.yml)
+[![Rust](https://img.shields.io/badge/rust-1.83%2B-orange?logo=rust)](https://www.rust-lang.org)
+[![Postgres](https://img.shields.io/badge/postgres-16-336791?logo=postgresql)](https://www.postgresql.org)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Tests](https://img.shields.io/badge/tests-46%20passing-brightgreen)](tests/)
 
-## Tech Stack
+A production-oriented Rust backend for **Products**, **Orders**, and
+**Inventory**, built with **Axum + Tokio + PostgreSQL (sqlx)**.
 
-| Concern              | Tool                                                      |
-|-----------------------|------------------------------------------------------------|
-| HTTP framework          | [Axum](https://github.com/tokio-rs/axum) 0.7              |
-| Async runtime             | [Tokio](https://tokio.rs) (full features)                  |
-| Database                    | PostgreSQL + [sqlx](https://github.com/launchbadge/sqlx) (runtime-checked queries, not compile-time `query!` macros, so the image can be built without a live DB) |
-| Background job                | `tokio::time::interval`, runs every 1 minute                |
-| Containerization                | Docker (multi-stage) + docker-compose                    |
+Highlights:
 
-## Folder Structure
+- **Atomic orders** with `SELECT ... FOR UPDATE`, deterministic lock ordering,
+  and per-row locking — 20 concurrent requests never oversell.
+- **Per-order access tokens** on top of the UUID — IDOR/BOLA safe.
+- **Idempotency keys** on `POST /api/orders` — retries are safe.
+- **Inventory ledger** — every stock change is recorded with a reason,
+  reconcilable against current stock (`SUM(movements) == stock`).
+- **Background sweeper** — cancels stale pending orders and restores stock,
+  guarded by a Postgres advisory lock (multi-instance safe).
+- **Production Docker stack** — Caddy auto-HTTPS, isolated networks,
+  `read_only` app FS, resource limits, `/ready` healthchecks.
 
-```
-src/
-  main.rs              # entrypoint: config, pool, migrations, background job, HTTP server
-  lib.rs                # crate root: AppState, build_app(), run_migrations()
-  errors.rs             # AppError -> IntoResponse (JSON error mapping)
-  models/
-    product.rs           # Product, CreateProductRequest, UpdateProductRequest
-    order.rs              # Order, OrderItem, OrderStatus, CreateOrderRequest
-  db/
-    pool.rs                # PgPool builder
-    products.rs             # Product CRUD queries
-    orders.rs                # *Core logic*: atomic create_order, pay_order, cancel_stale_pending_orders
-  handlers/
-    products.rs               # HTTP handlers -> db::products
-    orders.rs                  # HTTP handlers -> db::orders
-  jobs/
-    cancel_pending.rs            # tokio::spawn loop that calls db::orders::cancel_stale_pending_orders
-migrations/
-  0001_init.sql                  # products, orders, order_items, order_status enum
-tests/
-  common/mod.rs                   # test helpers (pool + seed)
-  stock_concurrency.rs             # *Most important*: race-condition tests
-  background_job.rs                 # sweeper tests (cancel + restore stock)
-  http_api.rs                        # end-to-end HTTP tests
-```
+## Tech stack
 
-## How the Transaction/Locking Works (most important part)
+| Concern              | Tool                                              |
+|----------------------|---------------------------------------------------|
+| HTTP framework       | Axum 0.7                                          |
+| Async runtime        | Tokio (full features)                             |
+| Database             | PostgreSQL 16 + sqlx (runtime-checked queries)    |
+| Background jobs      | `tokio::time::interval` (60 s tick)               |
+| Containerization     | Docker (multi-stage) + Compose (dev + prod)       |
+| Reverse proxy        | Caddy 2 (auto-HTTPS, security headers)            |
 
-### The problem being solved
+## Quick start
 
-If two people try to buy the **last unit** of a product at the same time, without protection,
-both could read `stock_quantity = 1`, both decide there's enough stock, both decrement it, and
-stock ends up at `-1` — **overselling**.
+### Option 1 — Docker Compose (dev)
 
-### The solution used
+    cp .env.example .env
+    # edit .env (or accept defaults for a local stack)
+    docker compose up --build -d
+    docker compose logs -f app
 
-In `db/orders.rs`, the `create_order` function:
+App: <http://localhost:8080/health> · <http://localhost:8080/ready>
 
-1. **Opens a database transaction** (`pool.begin()`). Everything below — checking, decrementing,
-   creating the order and order_items — happens inside a single transaction. If any step fails,
-   we return early (`return Err(...)`) before `tx.commit()`, and sqlx **auto-rolls-back** the
-   transaction (dropping a `Transaction` without calling `commit()` = rollback) — no partial
-   change is ever persisted to the database.
+### Option 2 — Local (no Docker)
 
-2. **`SELECT price, stock_quantity FROM products WHERE id = $1 FOR UPDATE`** — this is the key
-   to race-condition safety. `FOR UPDATE` **locks the row** at the database level until the
-   transaction either `COMMIT`s or `ROLLBACK`s. If a second concurrent request tries to
-   `FOR UPDATE` the same row, PostgreSQL makes it **block/wait** until the first transaction
-   finishes — so the second request's read of stock will reflect the already-decremented value,
-   not the stale one.
+    cp .env.example .env
+    # edit .env:
+    #   DATABASE_URL=postgres://<user>:<pass>@localhost:5432/ecommerce
+    #   ADMIN_API_KEY=<random 32+ chars>
+    cargo run
 
-3. **Deterministic (sorted) lock ordering** — if an order contains more than one item, we merge
-   them into a `BTreeMap<Uuid, i32>` (which is sorted by `product_id`) before locking anything.
-   This prevents **deadlocks**: if order A contains products 1 and 2, and order B contains 2 and
-   1, and each locked them in a different order (A: 1→2, B: 2→1), they could deadlock waiting on
-   each other. By guaranteeing every order locks products in the same order (by UUID), this can
-   never happen.
+Migrations run automatically on startup (`sqlx::migrate!`).
 
-4. **Duplicate product_ids within a single order are merged** before locking, so the same row is
-   never locked/updated twice inside one transaction.
+### Option 3 — Production
 
-5. Once we've confirmed there's enough stock for **every** item (if even one fails, we return the
-   error immediately — nothing has been written yet), we:
-   - `INSERT` the order (status = `pending`)
-   - For each item: `UPDATE products SET stock_quantity = stock_quantity - $1 ...` then
-     `INSERT` the order_item
-   - `tx.commit()` — now every change is persisted together, either all of it or none of it.
+See [docs/DEPLOY.md](docs/DEPLOY.md).
 
-### Confirm Payment (`pay_order`) and the Background Job
+## API
 
-`pay_order` and `cancel_stale_pending_orders` (the background job) also use
-`SELECT status FROM orders WHERE id = $1 FOR UPDATE` before changing status. This prevents a
-race between a user clicking "pay" at the exact moment the background job is trying to cancel
-the same order because it's been pending for over 15 minutes — one of them locks the order row,
-the other waits, then re-checks the status (which may have already changed) before proceeding.
+### Public
 
-### Background Job (`jobs/cancel_pending.rs`)
+| Method | Path                          | Notes                                          |
+|--------|-------------------------------|------------------------------------------------|
+| GET    | `/health`                     | Liveness — plain `ok`.                         |
+| GET    | `/ready`                      | Readiness — pings DB, returns 200 or 503.      |
+| GET    | `/api/products`               | Paginated (`?limit=50&offset=0`, max 200).     |
+| GET    | `/api/products/low-stock`     | `stock_quantity <= low_stock_threshold`.       |
+| GET    | `/api/products/:id`           | Single product.                                |
+| POST   | `/api/orders`                 | Create order. Supports `Idempotency-Key`.      |
+| GET    | `/api/orders/:id`             | Requires `X-Order-Token` (from create response). |
 
-- Uses `tokio::time::interval` to run every **1 minute**.
-- For every order with status `pending` that has been unpaid for over **15 minutes**:
-  1. Locks the order row (`FOR UPDATE`) and re-checks its status — if it was already paid
-     between the time it was flagged as "stale" and the time it got locked, it's left alone
-     (not cancelled).
-  2. Locks the products involved in the order (in the same deterministic order as #3 above) and
-     **restores the stock** (`stock_quantity = stock_quantity + quantity`).
-  3. Changes the order status to `cancelled`.
-  4. Each order is processed in **its own transaction**, so one problematic order can't block
-     the rest of the sweep.
+### Admin (`X-API-Key: <ADMIN_API_KEY>`)
 
-## Endpoints
+| Method | Path                                | Notes                                       |
+|--------|-------------------------------------|---------------------------------------------|
+| POST   | `/api/products`                     | Create product.                             |
+| PUT    | `/api/products/:id`                 | Partial update. Stock delta is ledgered.    |
+| DELETE | `/api/products/:id`                 | Refused (409) if any order or movement refs.|
+| POST   | `/api/orders/:id/pay`               | Simulated payment (`pending → paid`).       |
+| GET    | `/api/products/:id/movements`       | Per-product ledger history.                 |
+| GET    | `/api/inventory/movements`          | All movements, paginated.                   |
+| POST   | `/api/inventory/adjustments`        | Manual stock adjustment (with `note`).      |
 
-| Method | Path                          | Description                                            |
-|--------|-------------------------------|----------------------------------------------------------|
-| POST   | `/api/products`                | Create a product                                          |
-| GET    | `/api/products`                 | List all products                                          |
-| GET    | `/api/products/:id`              | Get a single product                                        |
-| PUT    | `/api/products/:id`               | Update a product (partial update)                            |
-| DELETE | `/api/products/:id`                | Delete a product                                              |
-| GET    | `/api/products/low-stock`           | Products where stock ≤ low_stock_threshold                    |
-| POST   | `/api/orders`                        | Create an order (atomic, with stock check + row locking)      |
-| GET    | `/api/orders/:id`                     | Full order details + its items                                |
-| POST   | `/api/orders/:id/pay`                  | Simulated payment confirmation (pending → paid)                |
-| GET    | `/health`                                | Health check                                                   |
+## How order creation works
 
-## Running It
+`create_order` in `src/db/orders.rs`:
 
-### Option 1: `setup.sh` (easiest)
+1. Merges duplicate `product_id` line items into a `BTreeMap` (sorted by UUID)
+   using `checked_add` (no `i32` overflow).
+2. Opens a DB transaction.
+3. For each product (in sorted UUID order — **deadlock-safe**):
+   `SELECT price, stock_quantity FROM products WHERE id = $1 FOR UPDATE`.
+4. If any line item lacks stock → return early → transaction rolls back.
+5. `INSERT INTO orders`, `UPDATE products SET stock_quantity = stock_quantity - qty`,
+   `INSERT INTO inventory_movements (change = -qty, reason = 'order_reservation')`,
+   `INSERT INTO order_items`.
+6. If `Idempotency-Key` was provided, insert the mapping in the same transaction.
+7. `COMMIT`.
 
-```bash
-chmod +x setup.sh
-./setup.sh
-```
+Guarantees:
 
-This will:
-1. Create every project file/folder (if not already present).
-2. Create `.env` from `.env.example`.
-3. `docker-compose up --build -d` (Postgres + app).
-4. Wait until the app is healthy (migrations run automatically on app startup via
-   `sqlx::migrate!`).
-5. Seed sample products via `curl` calls to `/api/products`.
-6. Print a success message with example `curl` commands for trying the API.
+- **Exactly 5 of 20** concurrent requests succeed against `stock = 5` — no
+  negative stock, no double-sell, no partial writes.
+- **Retries** with the same `Idempotency-Key` return the original order without
+  decrementing stock again.
+- **Ledger reconciliation**: for any product, `SUM(change)` equals current
+  `stock_quantity`. If they ever diverge, you have a bug — the invariant is
+  enforced by tests.
 
-### Option 2: Docker Compose directly
+## Inventory ledger
 
-```bash
-cp .env.example .env
-docker compose up --build -d
-docker compose logs -f app
-```
+`inventory_movements` is append-only. Every write to `products.stock_quantity`
+happens in the same transaction as a corresponding `inventory_movements` row.
 
-### Option 3: Run locally (no Docker)
+| Reason                | When                                              | `change`       |
+|-----------------------|---------------------------------------------------|----------------|
+| `initial`             | `create_product` (stock > 0)                      | `+stock`       |
+| `order_reservation`   | `create_order`                                    | `-qty`         |
+| `order_cancellation`  | stale-order sweeper                               | `+qty`         |
+| `admin_adjustment`    | `update_product` (if delta ≠ 0) or `adjust_stock` | `delta`        |
+| `stock_sync`          | reserved for future reconciliation jobs           | —              |
 
-```bash
-export DATABASE_URL=postgres://ecommerce:ecommerce@localhost:5432/ecommerce
-cargo run
-```
+## Testing
 
-## Tests
+Requires a reachable Postgres. Set `TEST_DATABASE_URL` (or `DATABASE_URL`):
 
-You need a reachable PostgreSQL instance via `TEST_DATABASE_URL` (or `DATABASE_URL`):
+    export TEST_DATABASE_URL="postgres://postgres:postgres@127.0.0.1:5432/ecommerce_test"
+    cargo test -- --test-threads=1
 
-```bash
-export TEST_DATABASE_URL=postgres://ecommerce:ecommerce@localhost:5432/ecommerce
-cargo test -- --test-threads=1
-```
+`--test-threads=1` is required: each test TRUNCATEs shared tables, so parallel
+execution would cause flaky failures.
 
-> **Important**: `--test-threads=1` matters because each integration test `TRUNCATE`s the
-> shared tables (products/orders/order_items) at the start — running them in parallel would let
-> tests interfere with each other.
+### Highlights
 
-The most important tests live in `tests/stock_concurrency.rs`:
-- `concurrent_orders_never_oversell_stock` — fires **20 concurrent requests** at a product with
-  stock=5, and asserts that **exactly 5** succeed, the other 15 get `InsufficientStock`, and the
-  final stock lands exactly at **0** (never negative).
-- `insufficient_stock_rolls_back_cleanly` — no order or order_item is written if stock isn't
-  enough.
-- `multi_item_order_rolls_back_all_products_on_partial_failure` — if one item in a multi-item
-  order fails, EVERY product in that order rolls back (not just the failing one).
+- **`stock_concurrency::concurrent_orders_never_oversell_stock`** — 20
+  concurrent requests against stock=5, exactly 5 succeed, stock lands at 0.
+- **`phase3_inventory::ledger_reconciles_with_current_stock`** — mixes orders,
+  cancellations, and manual adjustments, then asserts `SUM(movements) == stock`.
+- **`phase1_security::order_without_token_returns_not_found`** — UUID alone is
+  not enough; `access_token` is mandatory.
+- **`multi_worker::two_concurrent_sweeps_do_not_double_restock`** — two
+  concurrent background sweeps restore stock exactly once.
 
-This project was built and verified against a real local PostgreSQL instance during
-development: `cargo check`/`cargo build` compile cleanly, the app boots and applies migrations,
-and `cargo test -- --test-threads=1` passes all 8 tests, including the 20-way concurrency test
-above.
+46 tests total across 10 binaries.
 
-## Environment Variables
+## Security
 
-See `.env.example`:
+See [SECURITY.md](SECURITY.md) for the vulnerability-reporting policy and the
+full hardening checklist.
 
-```
-POSTGRES_USER=ecommerce
-POSTGRES_PASSWORD=ecommerce
-POSTGRES_DB=ecommerce
-POSTGRES_PORT=5432
-APP_PORT=8080
-DATABASE_URL=postgres://ecommerce:ecommerce@localhost:5432/ecommerce
-RUST_LOG=ecommerce_inventory=info,tower_http=info
-```
+Key measures:
+
+- Order ownership via per-order `access_token` (BOLA / IDOR fix).
+- Idempotency keys on order creation.
+- CORS fail-closed in production (`APP_ENV=production`).
+- Admin routes gated by `X-API-Key` with constant-time comparison.
+- Postgres unreachable from host in prod compose (`internal: true`).
+- Caddy sets HSTS, X-Content-Type-Options, X-Frame-Options, Referrer-Policy,
+  Permissions-Policy; caps request body at 1 MB.
+- Containers run non-root with `read_only` root FS, `no-new-privileges`,
+  memory/CPU limits.
+
+## Deployment
+
+See [docs/DEPLOY.md](docs/DEPLOY.md). TL;DR:
+
+    cp .env.prod.example .env.prod
+    # generate strong secrets:
+    #   openssl rand -hex 32   (POSTGRES_PASSWORD)
+    #   openssl rand -hex 32   (ADMIN_API_KEY)
+    # edit DOMAIN and ACME_EMAIL in .env.prod
+    docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
+
+First HTTPS request to `https://$DOMAIN/health` triggers Let's Encrypt
+provisioning.
+
+## Repository layout
+
+    src/
+      main.rs                   entrypoint: config, pool, migrations, jobs, HTTP server
+      lib.rs                    crate root: AppState, build_app(), run_migrations()
+      errors.rs                 AppError -> IntoResponse (JSON error mapping)
+      models/
+        product.rs              Product, Create/UpdateProductRequest
+        order.rs                Order, OrderItem, OrderStatus, CreateOrderRequest
+        inventory.rs            InventoryMovement, AdjustStockRequest
+      db/
+        pool.rs                 PgPool builder (min 2 connections)
+        products.rs             Product CRUD, ledger on stock changes
+        orders.rs               create_order (locked), pay_order, cancel_stale_pending_orders
+        inventory.rs            ledger queries + adjust_stock
+      handlers/
+        products.rs             HTTP handlers for /api/products
+        orders.rs               HTTP handlers for /api/orders
+        inventory.rs            HTTP handlers for movements + adjustments
+        health.rs               /health (liveness) and /ready (readiness)
+      jobs/
+        cancel_pending.rs       tokio loop that calls cancel_stale_pending_orders
+    migrations/
+      0001_init.sql             products, orders, order_items, order_status enum
+      0002_order_access_token.sql   orders.access_token + unique index
+      0003_idempotency.sql      idempotency_keys table
+      0004_inventory_movements.sql  append-only inventory ledger
+    tests/
+      common/mod.rs             shared test helpers (pool, truncate, seed)
+      stock_concurrency.rs      20-way oversell test — the most important one
+      phase1_security.rs        C1/C3/C4/C6 regression tests
+      phase3_inventory.rs       ledger + reconciliation tests
+      background_job.rs         sweeper tests (cancel, restore, race with pay)
+      multi_worker.rs           advisory lock (two sweeps, no double-restock)
+      product_update_race.rs    update_product vs create_order, no stock resurrection
+      http_api.rs               end-to-end /health, /ready, order flow
+      orders_edge.rs            validation + pay/cancel race
+      product_validation.rs     SKU uniqueness, non-negative thresholds, ...
+      auth.rs                   admin API-key enforcement
+    docs/
+      DEPLOY.md                 production deployment guide
+    Dockerfile                  multi-stage build, non-root runtime
+    docker-compose.yml          local dev stack
+    docker-compose.prod.yml     production stack (Caddy + isolated networks)
+    Caddyfile                   reverse-proxy config for the prod stack
+    .env.example                local-dev env template
+    .env.prod.example           production env template (CHANGE_ME placeholders)
 
 ## License
 
-MIT License.
+MIT — see [LICENSE](LICENSE).
