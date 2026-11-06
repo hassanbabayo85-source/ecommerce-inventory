@@ -19,12 +19,43 @@ async fn spawn_app() -> String {
     format!("http://{addr}")
 }
 
+// ============================================================
+// Phase 4 — health & readiness
+// ============================================================
+
+#[tokio::test]
+#[serial_test::serial]
+async fn health_endpoint_is_plain_ok() {
+    let base = spawn_app().await;
+    let client = reqwest::Client::new();
+    let resp = client.get(format!("{base}/health")).send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let text = resp.text().await.unwrap();
+    assert_eq!(text, "ok");
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn ready_endpoint_returns_200_when_db_is_up() {
+    let base = spawn_app().await;
+    let client = reqwest::Client::new();
+    let resp = client.get(format!("{base}/ready")).send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["status"], "ready");
+}
+
+// ============================================================
+// End-to-end product + order flow
+// ============================================================
+
 #[tokio::test]
 #[serial_test::serial]
 async fn full_product_and_order_http_flow() {
     let base = spawn_app().await;
     let client = reqwest::Client::new();
 
+    // Create a product (admin — needs X-API-Key).
     let resp = client
         .post(format!("{base}/api/products"))
         .header("x-api-key", common::TEST_API_KEY)
@@ -80,6 +111,7 @@ async fn full_product_and_order_http_flow() {
     assert_eq!(low_stock.as_array().unwrap().len(), 1);
     assert_eq!(low_stock[0]["stock_quantity"], 1);
 
+    // Ordering more than the remaining 1 unit fails with 409 (public).
     let resp = client
         .post(format!("{base}/api/orders"))
         .json(&json!({
