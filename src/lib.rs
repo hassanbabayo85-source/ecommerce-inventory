@@ -13,17 +13,12 @@ use sqlx::PgPool;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
-/// Shared application state, injected into every handler via `axum::extract::State`.
 #[derive(Clone)]
 pub struct AppState {
     pub pool: PgPool,
     pub admin_api_key: String,
 }
 
-/// Builds the full Axum `Router` (routes + shared state + middleware).
-///
-/// Admin routes (create/update/delete product, pay order) are guarded by
-/// `auth::require_admin`, which checks `X-API-Key` against `admin_api_key`.
 pub fn build_app(pool: PgPool, admin_api_key: String, cors_origins: Vec<String>) -> Router {
     let state = AppState {
         pool,
@@ -45,11 +40,26 @@ pub fn build_app(pool: PgPool, admin_api_key: String, cors_origins: Vec<String>)
 
 /// Builds a CORS layer from a list of allowed origins.
 ///
-/// - Empty list or containing `*` → permissive (dev default, logs a warning).
-/// - Otherwise → strict allow-list. In production set
-///   `CORS_ALLOWED_ORIGINS=https://app.example.com,https://admin.example.com`.
+/// Fail-safe behaviour (C2):
+///   - `APP_ENV=production` (or `CORS_STRICT=true`) + empty/malformed
+///     CORS_ALLOWED_ORIGINS → **panics at startup**.
+///   - Otherwise (dev) → falls back to permissive with a loud warning.
 fn build_cors_layer(origins: &[String]) -> CorsLayer {
-    if origins.is_empty() || origins.iter().any(|o| o == "*") {
+    let strict = std::env::var("APP_ENV")
+        .map(|v| v.eq_ignore_ascii_case("production") || v.eq_ignore_ascii_case("prod"))
+        .unwrap_or(false)
+        || std::env::var("CORS_STRICT")
+            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "True"))
+            .unwrap_or(false);
+
+    let empty_or_star = origins.is_empty() || origins.iter().any(|o| o == "*");
+    if empty_or_star {
+        if strict {
+            panic!(
+                "CORS misconfigured: CORS_ALLOWED_ORIGINS is empty or contains '*', \
+                 but APP_ENV=production / CORS_STRICT is set. Set explicit origins."
+            );
+        }
         tracing::warn!(
             "CORS is permissive — set CORS_ALLOWED_ORIGINS in production to a comma-separated list"
         );
@@ -57,14 +67,36 @@ fn build_cors_layer(origins: &[String]) -> CorsLayer {
     }
 
     let mut parsed: Vec<HeaderValue> = Vec::with_capacity(origins.len());
+    let mut invalid: Vec<String> = Vec::new();
     for o in origins {
         match HeaderValue::from_str(o) {
             Ok(v) => parsed.push(v),
-            Err(e) => tracing::error!(origin = %o, error = %e, "skipping invalid CORS origin"),
+            Err(e) => {
+                tracing::error!(origin = %o, error = %e, "invalid CORS origin");
+                invalid.push(o.clone());
+            }
         }
     }
+
+    if !invalid.is_empty() {
+        if strict {
+            panic!(
+                "CORS misconfigured: invalid CORS_ALLOWED_ORIGINS entries: {}",
+                invalid.join(", ")
+            );
+        }
+        tracing::warn!(
+            "skipping {} invalid CORS origin(s) in non-strict mode: {}",
+            invalid.len(),
+            invalid.join(", ")
+        );
+    }
+
     if parsed.is_empty() {
-        tracing::warn!("all CORS origins were invalid — falling back to permissive");
+        if strict {
+            panic!("CORS misconfigured: no valid CORS_ALLOWED_ORIGINS remain.");
+        }
+        tracing::warn!("all CORS origins were invalid — falling back to permissive (dev only)");
         return CorsLayer::permissive();
     }
 
@@ -81,7 +113,6 @@ fn build_cors_layer(origins: &[String]) -> CorsLayer {
         .allow_credentials(true)
 }
 
-/// Runs pending SQL migrations embedded in the binary at compile time.
 pub async fn run_migrations(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
     sqlx::migrate!("./migrations").run(pool).await
 }
