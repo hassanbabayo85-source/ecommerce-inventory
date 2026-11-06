@@ -1,19 +1,11 @@
+use crate::db::inventory::log_movement;
 use crate::errors::{AppError, AppResult};
+use crate::models::inventory::{REASON_ADMIN_ADJUSTMENT, REASON_INITIAL};
 use crate::models::product::{CreateProductRequest, Product, UpdateProductRequest};
 use rust_decimal::Decimal;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-/// Maps a database error from a product INSERT/UPDATE to a user-facing `AppError`.
-///
-/// Distinguishes by SQLSTATE (fixes C4 from audit):
-///   - 23505 = unique_violation → "sku already exists"
-///   - 23514 = check_violation  → generic constraint message (price>=0, stock>=0, threshold>=0)
-///
-///
-///
-///
-/// Anything else is treated as an internal DB error.
 fn map_product_db_error(e: sqlx::Error, sku: &str) -> AppError {
     if let sqlx::Error::Database(ref db_err) = e {
         match db_err.code().as_deref() {
@@ -32,9 +24,6 @@ fn map_product_db_error(e: sqlx::Error, sku: &str) -> AppError {
     AppError::Database(e)
 }
 
-/// Validates fields about to be written to a product row.
-/// `name` and `sku` must be non-empty; numeric fields must be non-negative.
-/// (Fixes C2 and C3 from audit.)
 fn validate_product_fields(
     name: &str,
     sku: &str,
@@ -75,6 +64,8 @@ pub async fn create_product(pool: &PgPool, req: CreateProductRequest) -> AppResu
         low_stock_threshold,
     )?;
 
+    let mut tx = pool.begin().await?;
+
     let product = sqlx::query_as::<_, Product>(
         r#"
         INSERT INTO products (name, sku, price, stock_quantity, low_stock_threshold)
@@ -87,18 +78,27 @@ pub async fn create_product(pool: &PgPool, req: CreateProductRequest) -> AppResu
     .bind(req.price)
     .bind(req.stock_quantity)
     .bind(low_stock_threshold)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await
     .map_err(|e| map_product_db_error(e, &req.sku))?;
 
+    // Phase 3: log initial balance — only if stock > 0.
+    if product.stock_quantity > 0 {
+        log_movement(
+            &mut tx,
+            product.id,
+            product.stock_quantity,
+            REASON_INITIAL,
+            None,
+            None,
+        )
+        .await?;
+    }
+
+    tx.commit().await?;
     Ok(product)
 }
 
-/// Lists products with pagination.
-///
-/// Returns `(products, total_count)` where `total_count` is the total number of
-/// products in the table (ignoring pagination), suitable for the `X-Total-Count`
-/// response header. `limit` is clamped by the caller (handler) to [1, 200].
 pub async fn list_products(
     pool: &PgPool,
     limit: i64,
@@ -140,18 +140,11 @@ pub async fn get_product(pool: &PgPool, id: Uuid) -> AppResult<Product> {
     Ok(product)
 }
 
-/// Partially updates a product row.
-///
-/// Correctness (fixes C1 from audit): read + write happen inside ONE transaction with
-/// `SELECT ... FOR UPDATE`. Without this, a concurrent `create_order` could decrement
-/// `stock_quantity` in the window between our read and our write, and our stale write
-/// would silently resurrect the sold stock.
 pub async fn update_product(
     pool: &PgPool,
     id: Uuid,
     req: UpdateProductRequest,
 ) -> AppResult<Product> {
-    // Pre-checks on incoming fields (avoids opening a transaction just to fail).
     if let Some(ref n) = req.name {
         if n.trim().is_empty() {
             return Err(AppError::Validation("name must not be empty".into()));
@@ -184,7 +177,6 @@ pub async fn update_product(
 
     let mut tx = pool.begin().await?;
 
-    // Row-level lock: concurrent orders/updates block here until we commit.
     let current = sqlx::query_as::<_, Product>(
         r#"
         SELECT id, name, sku, price, stock_quantity, low_stock_threshold, created_at, updated_at
@@ -206,8 +198,9 @@ pub async fn update_product(
         .low_stock_threshold
         .unwrap_or(current.low_stock_threshold);
 
-    // Belt-and-braces: revalidate merged values.
     validate_product_fields(&name, &sku, price, stock_quantity, low_stock_threshold)?;
+
+    let stock_delta = stock_quantity.wrapping_sub(current.stock_quantity);
 
     let product = sqlx::query_as::<_, Product>(
         r#"
@@ -228,13 +221,25 @@ pub async fn update_product(
     .await
     .map_err(|e| map_product_db_error(e, &sku))?;
 
+    // Phase 3: log delta only if stock actually changed.
+    if stock_delta != 0 {
+        log_movement(
+            &mut tx,
+            id,
+            stock_delta,
+            REASON_ADMIN_ADJUSTMENT,
+            None,
+            None,
+        )
+        .await?;
+    }
+
     tx.commit().await?;
     Ok(product)
 }
 
 pub async fn delete_product(pool: &PgPool, id: Uuid) -> AppResult<()> {
-    // C4: refuse deletion if referenced by any order_item. Otherwise Postgres
-    // returns a foreign-key violation (23503), which surfaces as a 500.
+    // C4: refuse deletion if referenced by any order_item.
     let refs: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM order_items WHERE product_id = $1")
         .bind(id)
         .fetch_one(pool)
@@ -243,6 +248,19 @@ pub async fn delete_product(pool: &PgPool, id: Uuid) -> AppResult<()> {
         return Err(AppError::InvalidState(format!(
             "product {id} cannot be deleted: referenced by {} order item(s); consider soft-delete or archive",
             refs.0
+        )));
+    }
+
+    // Phase 3: refuse deletion if any audit history exists.
+    let movements: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM inventory_movements WHERE product_id = $1")
+            .bind(id)
+            .fetch_one(pool)
+            .await?;
+    if movements.0 > 0 {
+        return Err(AppError::InvalidState(format!(
+            "product {id} cannot be deleted: has {} inventory movement(s); audit trail must be preserved",
+            movements.0
         )));
     }
 

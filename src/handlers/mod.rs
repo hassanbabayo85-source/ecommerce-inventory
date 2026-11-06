@@ -1,3 +1,4 @@
+pub mod inventory;
 pub mod orders;
 pub mod products;
 
@@ -8,7 +9,6 @@ use axum::{
 
 use crate::AppState;
 
-/// Routes accessible without authentication (customer-facing).
 pub fn public_routes() -> Router<AppState> {
     Router::new()
         .route("/health", get(health))
@@ -19,7 +19,6 @@ pub fn public_routes() -> Router<AppState> {
         .route("/api/orders/:id", get(orders::get_order))
 }
 
-/// Routes that require a valid `X-API-Key` header (admin operations).
 pub fn admin_routes() -> Router<AppState> {
     Router::new()
         .route("/api/products", post(products::create_product))
@@ -28,6 +27,15 @@ pub fn admin_routes() -> Router<AppState> {
             put(products::update_product).delete(products::delete_product),
         )
         .route("/api/orders/:id/pay", post(orders::pay_order))
+        .route(
+            "/api/products/:id/movements",
+            get(inventory::list_product_movements),
+        )
+        .route(
+            "/api/inventory/movements",
+            get(inventory::list_all_movements),
+        )
+        .route("/api/inventory/adjustments", post(inventory::adjust_stock))
 }
 
 async fn health() -> &'static str {

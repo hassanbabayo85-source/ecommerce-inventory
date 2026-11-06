@@ -1,4 +1,5 @@
 use crate::errors::{AppError, AppResult};
+use crate::models::inventory::{REASON_ORDER_CANCELLATION, REASON_ORDER_RESERVATION};
 use crate::models::order::{
     CreateOrderRequest, CreateOrderResponse, Order, OrderItem, OrderStatus, OrderWithItems,
 };
@@ -7,11 +8,6 @@ use sqlx::PgPool;
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
-/// Creates an order and reduces stock atomically.
-///
-/// Concurrency: single tx, `FOR UPDATE` per product row, sorted lock order
-/// (BTreeMap), duplicate product ids merged (checked_add → C3), optional
-/// idempotency key (C6), returns access token exactly once (C1).
 pub async fn create_order(
     pool: &PgPool,
     req: CreateOrderRequest,
@@ -34,14 +30,12 @@ pub async fn create_order(
         }
     }
 
-    // C6 fast-path: if this key was already used, return the original order.
     if let Some(ref key) = idempotency_key {
         if let Some(existing) = load_by_idempotency(pool, key).await? {
             return Ok(existing);
         }
     }
 
-    // C3: checked_add — reject i32 overflow instead of silently wrapping.
     let mut merged: BTreeMap<Uuid, i32> = BTreeMap::new();
     for item in &req.items {
         let slot = merged.entry(item.product_id).or_insert(0);
@@ -102,6 +96,20 @@ pub async fn create_order(
         .execute(&mut *tx)
         .await?;
 
+        // Phase 3: ledger entry — same transaction as stock decrement.
+        sqlx::query(
+            r#"
+            INSERT INTO inventory_movements (product_id, change, reason, reference_id)
+            VALUES ($1, $2, $3, $4)
+            "#,
+        )
+        .bind(product_id)
+        .bind(-quantity)
+        .bind(REASON_ORDER_RESERVATION)
+        .bind(order.id)
+        .execute(&mut *tx)
+        .await?;
+
         let item = sqlx::query_as::<_, OrderItem>(
             r#"
             INSERT INTO order_items (order_id, product_id, quantity, unit_price)
@@ -119,7 +127,6 @@ pub async fn create_order(
         items.push(item);
     }
 
-    // C6: record idempotency key inside the same transaction.
     if let Some(ref key) = idempotency_key {
         sqlx::query("INSERT INTO idempotency_keys (key, order_id) VALUES ($1, $2)")
             .bind(key)
@@ -190,9 +197,6 @@ async fn load_by_idempotency(pool: &PgPool, key: &str) -> AppResult<Option<Creat
     }))
 }
 
-/// Fetches an order + items, enforcing the access-token requirement (C1).
-/// Returns NotFound on mismatch (not 401) so the endpoint does not leak
-/// whether the order id exists.
 pub async fn get_order_with_items(
     pool: &PgPool,
     id: Uuid,
@@ -344,6 +348,20 @@ async fn do_sweep(pool: &PgPool, timeout_minutes: i64) -> AppResult<Vec<Uuid>> {
             )
             .bind(quantity)
             .bind(product_id)
+            .execute(&mut *tx)
+            .await?;
+
+            // Phase 3: ledger entry — same transaction as stock restoration.
+            sqlx::query(
+                r#"
+                INSERT INTO inventory_movements (product_id, change, reason, reference_id)
+                VALUES ($1, $2, $3, $4)
+                "#,
+            )
+            .bind(product_id)
+            .bind(quantity)
+            .bind(REASON_ORDER_CANCELLATION)
+            .bind(order_id)
             .execute(&mut *tx)
             .await?;
         }
