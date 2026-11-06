@@ -31,3 +31,8 @@ audit_*.txt
 
 # Logs
 *.log
+
+# Production env / compose (never bake into image)
+.env.prod
+.env.*
+docker-compose.prod.yml

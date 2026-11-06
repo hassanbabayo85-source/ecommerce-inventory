@@ -22,3 +22,7 @@ audit_*.txt
 
 # Logs
 *.log
+
+# Production secrets
+.env.prod
+.env.prod.local
