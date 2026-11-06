@@ -1,0 +1,44 @@
+# Caddy 2 config — automatic HTTPS via Let's Encrypt.
+#
+# - $DOMAIN must resolve to this host (A record).
+# - $ACME_EMAIL receives certificate-expiry warnings.
+# - Forward to app:8080 on the frontend network.
+#
+# For local testing without DNS, replace {$DOMAIN} with :80
+# and add `auto_https off` (Caddy will serve plain HTTP).
+
+{
+    email {$ACME_EMAIL}
+}
+
+{$DOMAIN} {
+    encode zstd gzip
+
+    # Reverse proxy to the Axum app.
+    reverse_proxy app:8080 {
+        health_uri /ready
+        health_interval 15s
+        health_timeout 5s
+    }
+
+    # Security headers (applied to all responses).
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options    "nosniff"
+        X-Frame-Options           "DENY"
+        Referrer-Policy           "strict-origin-when-cross-origin"
+        Permissions-Policy        "geolocation=(), microphone=(), camera=()"
+        -Server
+    }
+
+    # Basic request-size limit at the proxy edge (defense in depth).
+    request_body {
+        max_size 1MB
+    }
+
+    # Structured access logs on stdout.
+    log {
+        output stdout
+        format console
+    }
+}
