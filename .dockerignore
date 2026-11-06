@@ -1,6 +1,33 @@
+# Build artifacts (huge — never send to daemon)
 target
+**/target
+
+# Version control (huge)
 .git
+.gitignore
+.gitattributes
+
+# Secrets — never let these into the build context
 .env
-*.log
-tests
+.env.local
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Docs / CI (not needed for image build)
 README.md
+docs/
+.github/
+
+# Audit artifacts
+audit_*.txt
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Logs
+*.log
