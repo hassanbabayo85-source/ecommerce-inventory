@@ -164,7 +164,7 @@ async fn delete_product_with_referencing_order_returns_conflict() {
 #[serial_test::serial]
 async fn delete_unreferenced_product_succeeds() {
     let pool = common::setup_pool().await;
-    let pid = common::seed_product(&pool, "DelOk", "DELOK-001", "5.00", 5).await;
+    let pid = common::seed_product(&pool, "DelOk", "DELOK-001", "5.00", 0).await;
 
     db::products::delete_product(&pool, pid)
         .await

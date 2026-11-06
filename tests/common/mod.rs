@@ -1,12 +1,7 @@
 //! Shared helpers for integration tests.
-//!
-//! `#![allow(dead_code)]` — each `tests/*.rs` binary includes this module but
-//! uses only the helpers it needs; unused helpers are expected.
 #![allow(dead_code)]
 
-use ecommerce_inventory::{
-    build_app, db, models::product::CreateProductRequest, run_migrations,
-};
+use ecommerce_inventory::{build_app, db, models::product::CreateProductRequest, run_migrations};
 use rust_decimal::Decimal;
 use sqlx::PgPool;
 
@@ -24,9 +19,10 @@ pub async fn setup_pool() -> PgPool {
         .await
         .expect("failed to run migrations");
 
-    // CASCADE also clears idempotency_keys (FK → orders).
+    // CASCADE also clears idempotency_keys (FK → orders) and
+    // inventory_movements (FK → products).
     sqlx::query(
-        "TRUNCATE TABLE idempotency_keys, order_items, orders, products RESTART IDENTITY CASCADE",
+        "TRUNCATE TABLE inventory_movements, idempotency_keys, order_items, orders, products RESTART IDENTITY CASCADE",
     )
     .execute(&pool)
     .await
