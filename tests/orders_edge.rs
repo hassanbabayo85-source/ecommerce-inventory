@@ -19,6 +19,7 @@ async fn create_order_rejects_empty_email() {
                 quantity: 1,
             }],
         },
+        None,
     )
     .await
     .expect_err("blank email must fail");
@@ -37,6 +38,7 @@ async fn create_order_rejects_empty_items() {
             customer_email: "buyer@example.com".into(),
             items: vec![],
         },
+        None,
     )
     .await
     .expect_err("empty items must fail");
@@ -60,6 +62,7 @@ async fn create_order_rejects_zero_or_negative_quantity() {
                     quantity: q,
                 }],
             },
+            None,
         )
         .await
         .expect_err("non-positive quantity must fail");
@@ -71,10 +74,6 @@ async fn create_order_rejects_zero_or_negative_quantity() {
 #[tokio::test]
 #[serial_test::serial]
 async fn payment_and_cancellation_race_does_not_double_restock() {
-    // Simulates: order is old enough to be cancelled, but gets paid just before the sweeper runs.
-    // Expected: since pay_order uses SELECT FOR UPDATE and sweeper re-checks status under lock,
-    // the order ends up either "paid" (stock stays decremented) or "cancelled" (stock restored),
-    // but never both effects.
     let pool = common::setup_pool().await;
     let product_id = common::seed_product(&pool, "Race Paid", "RACE-PAID-001", "5.00", 5).await;
 
@@ -87,18 +86,17 @@ async fn payment_and_cancellation_race_does_not_double_restock() {
                 quantity: 2,
             }],
         },
+        None,
     )
     .await
     .unwrap();
 
-    // Backdate so the sweeper would consider it stale.
     sqlx::query("UPDATE orders SET created_at = now() - interval '30 minutes' WHERE id = $1")
         .bind(created.order.id)
         .execute(&pool)
         .await
         .unwrap();
 
-    // Fire pay + cancel concurrently.
     let pool_pay = pool.clone();
     let order_id = created.order.id;
     let pay = tokio::spawn(async move { db::orders::pay_order(&pool_pay, order_id).await });
@@ -110,15 +108,15 @@ async fn payment_and_cancellation_race_does_not_double_restock() {
     let pay_result = pay.await.unwrap();
     let sweep_result = sweep.await.unwrap();
 
-    // At least one succeeded (whichever won the lock).
     assert!(
         pay_result.is_ok() || !sweep_result.unwrap_or_default().is_empty(),
         "either payment or cancellation must have happened"
     );
 
-    let order = db::orders::get_order_with_items(&pool, created.order.id)
-        .await
-        .unwrap();
+    let order =
+        db::orders::get_order_with_items(&pool, created.order.id, Some(created.access_token))
+            .await
+            .unwrap();
     let product = db::products::get_product(&pool, product_id).await.unwrap();
 
     match order.order.status {

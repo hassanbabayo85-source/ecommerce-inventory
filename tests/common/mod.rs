@@ -1,13 +1,17 @@
-use ecommerce_inventory::{build_app, db, models::product::CreateProductRequest, run_migrations};
+//! Shared helpers for integration tests.
+//!
+//! `#![allow(dead_code)]` — each `tests/*.rs` binary includes this module but
+//! uses only the helpers it needs; unused helpers are expected.
+#![allow(dead_code)]
+
+use ecommerce_inventory::{
+    build_app, db, models::product::CreateProductRequest, run_migrations,
+};
 use rust_decimal::Decimal;
 use sqlx::PgPool;
 
-/// The API key used by all tests hitting admin endpoints.
 pub const TEST_API_KEY: &str = "test-admin-key-1234567890";
 
-/// Connects to the test database (set TEST_DATABASE_URL, falls back to DATABASE_URL) and
-/// makes sure migrations are applied. Each test truncates the tables it touches at the start
-/// so tests stay independent even though they share one database/pool.
 pub async fn setup_pool() -> PgPool {
     let url = std::env::var("TEST_DATABASE_URL")
         .or_else(|_| std::env::var("DATABASE_URL"))
@@ -20,10 +24,13 @@ pub async fn setup_pool() -> PgPool {
         .await
         .expect("failed to run migrations");
 
-    sqlx::query("TRUNCATE TABLE order_items, orders, products RESTART IDENTITY CASCADE")
-        .execute(&pool)
-        .await
-        .expect("failed to truncate tables");
+    // CASCADE also clears idempotency_keys (FK → orders).
+    sqlx::query(
+        "TRUNCATE TABLE idempotency_keys, order_items, orders, products RESTART IDENTITY CASCADE",
+    )
+    .execute(&pool)
+    .await
+    .expect("failed to truncate tables");
 
     pool
 }

@@ -5,10 +5,6 @@ use ecommerce_inventory::models::order::{CreateOrderRequest, OrderItemRequest};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-/// The core correctness property of the whole system: if N concurrent requests race to buy
-/// units of a product with only K in stock (N > K), exactly K requests must succeed and the
-/// rest must fail with InsufficientStock — stock must never go negative and must never be
-/// double-sold. This exercises `SELECT ... FOR UPDATE` row locking inside a DB transaction.
 #[tokio::test]
 #[serial_test::serial]
 async fn concurrent_orders_never_oversell_stock() {
@@ -32,7 +28,7 @@ async fn concurrent_orders_never_oversell_stock() {
                     quantity: 1,
                 }],
             };
-            match db::orders::create_order(&pool, req).await {
+            match db::orders::create_order(&pool, req, None).await {
                 Ok(_) => {
                     success_count.fetch_add(1, Ordering::SeqCst);
                 }
@@ -48,7 +44,6 @@ async fn concurrent_orders_never_oversell_stock() {
         h.await.unwrap();
     }
 
-    // Exactly 5 of the 20 concurrent requests should have won the race.
     assert_eq!(success_count.load(Ordering::SeqCst), 5);
     assert_eq!(failure_count.load(Ordering::SeqCst), 15);
 
@@ -58,7 +53,6 @@ async fn concurrent_orders_never_oversell_stock() {
         "stock must land exactly at zero, never negative"
     );
 
-    // Sanity check: exactly 5 orders exist for this product and each reserved 1 unit.
     let orders_count: (i64,) =
         sqlx::query_as("SELECT COUNT(*) FROM order_items WHERE product_id = $1")
             .bind(product_id)
@@ -68,8 +62,6 @@ async fn concurrent_orders_never_oversell_stock() {
     assert_eq!(orders_count.0, 5);
 }
 
-/// A failed order (insufficient stock) must not leave any partial state behind: no order row,
-/// no order_items rows, and stock unchanged. Verifies the transaction rollback path.
 #[tokio::test]
 #[serial_test::serial]
 async fn insufficient_stock_rolls_back_cleanly() {
@@ -80,11 +72,11 @@ async fn insufficient_stock_rolls_back_cleanly() {
         customer_email: "buyer@example.com".to_string(),
         items: vec![OrderItemRequest {
             product_id,
-            quantity: 10, // more than the 2 in stock
+            quantity: 10,
         }],
     };
 
-    let result = db::orders::create_order(&pool, req).await;
+    let result = db::orders::create_order(&pool, req, None).await;
     assert!(matches!(
         result,
         Err(ecommerce_inventory::errors::AppError::InsufficientStock {
@@ -95,20 +87,15 @@ async fn insufficient_stock_rolls_back_cleanly() {
     ));
 
     let product = db::products::get_product(&pool, product_id).await.unwrap();
-    assert_eq!(
-        product.stock_quantity, 2,
-        "stock must be untouched after a rolled-back order"
-    );
+    assert_eq!(product.stock_quantity, 2);
 
     let orders_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM orders")
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(orders_count.0, 0, "no order row should have been persisted");
+    assert_eq!(orders_count.0, 0);
 }
 
-/// A multi-item order that partially fails (one product has enough stock, another doesn't)
-/// must roll back *both* products' stock, not just the one that failed.
 #[tokio::test]
 #[serial_test::serial]
 async fn multi_item_order_rolls_back_all_products_on_partial_failure() {
@@ -126,18 +113,15 @@ async fn multi_item_order_rolls_back_all_products_on_partial_failure() {
             OrderItemRequest {
                 product_id: scarce_id,
                 quantity: 5,
-            }, // fails: only 1 in stock
+            },
         ],
     };
 
-    let result = db::orders::create_order(&pool, req).await;
+    let result = db::orders::create_order(&pool, req, None).await;
     assert!(result.is_err());
 
     let plenty = db::products::get_product(&pool, plenty_id).await.unwrap();
     let scarce = db::products::get_product(&pool, scarce_id).await.unwrap();
-    assert_eq!(
-        plenty.stock_quantity, 100,
-        "unaffected product's stock must roll back too"
-    );
+    assert_eq!(plenty.stock_quantity, 100);
     assert_eq!(scarce.stock_quantity, 1);
 }

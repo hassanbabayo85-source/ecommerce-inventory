@@ -4,9 +4,6 @@ use ecommerce_inventory::db;
 use ecommerce_inventory::models::order::{CreateOrderRequest, OrderItemRequest, OrderStatus};
 use std::time::Duration;
 
-/// Two concurrent sweeps (simulating two app instances) must not both cancel the
-/// same order. The advisory lock serializes them; whichever wins does the work,
-/// the other returns an empty list.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial_test::serial]
 async fn two_concurrent_sweeps_do_not_double_restock() {
@@ -22,18 +19,17 @@ async fn two_concurrent_sweeps_do_not_double_restock() {
                 quantity: 4,
             }],
         },
+        None,
     )
     .await
     .unwrap();
 
-    // Stock is now 6.
     sqlx::query("UPDATE orders SET created_at = now() - interval '30 minutes' WHERE id = $1")
         .bind(created.order.id)
         .execute(&pool)
         .await
         .unwrap();
 
-    // Two parallel sweepers.
     let pool_a = pool.clone();
     let pool_b = pool.clone();
     let a = tokio::spawn(async move {
@@ -52,19 +48,17 @@ async fn two_concurrent_sweeps_do_not_double_restock() {
     assert_eq!(
         total_cancelled,
         1,
-        "exactly one sweeper must have cancelled the order (got a={}, b={})",
+        "exactly one sweeper must have cancelled (a={}, b={})",
         a_ids.len(),
         b_ids.len()
     );
 
-    let order = db::orders::get_order_with_items(&pool, created.order.id)
-        .await
-        .unwrap();
+    let order =
+        db::orders::get_order_with_items(&pool, created.order.id, Some(created.access_token))
+            .await
+            .unwrap();
     assert_eq!(order.order.status, OrderStatus::Cancelled);
 
     let product = db::products::get_product(&pool, product_id).await.unwrap();
-    assert_eq!(
-        product.stock_quantity, 10,
-        "stock must be restored exactly once (10), not twice (would be 14 if double-restored)"
-    );
+    assert_eq!(product.stock_quantity, 10);
 }

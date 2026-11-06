@@ -3,8 +3,6 @@ mod common;
 use ecommerce_inventory::db;
 use ecommerce_inventory::models::order::{CreateOrderRequest, OrderItemRequest, OrderStatus};
 
-/// Simulates the background sweeper finding an order that has been pending too long: it must
-/// flip the order to `cancelled` AND restore the stock that was reserved for it.
 #[tokio::test]
 #[serial_test::serial]
 async fn stale_pending_order_is_cancelled_and_stock_restored() {
@@ -20,16 +18,14 @@ async fn stale_pending_order_is_cancelled_and_stock_restored() {
                 quantity: 3,
             }],
         },
+        None,
     )
     .await
     .unwrap();
 
-    // Stock was reserved immediately.
     let product = db::products::get_product(&pool, product_id).await.unwrap();
     assert_eq!(product.stock_quantity, 7);
 
-    // Backdate the order's created_at so it looks like it has been pending for a long time,
-    // instead of waiting 15 real minutes in the test.
     sqlx::query("UPDATE orders SET created_at = now() - interval '30 minutes' WHERE id = $1")
         .bind(created.order.id)
         .execute(&pool)
@@ -41,19 +37,16 @@ async fn stale_pending_order_is_cancelled_and_stock_restored() {
         .unwrap();
     assert_eq!(cancelled_ids, vec![created.order.id]);
 
-    let order = db::orders::get_order_with_items(&pool, created.order.id)
-        .await
-        .unwrap();
+    let order =
+        db::orders::get_order_with_items(&pool, created.order.id, Some(created.access_token))
+            .await
+            .unwrap();
     assert_eq!(order.order.status, OrderStatus::Cancelled);
 
     let product = db::products::get_product(&pool, product_id).await.unwrap();
-    assert_eq!(
-        product.stock_quantity, 10,
-        "stock must be fully restored after cancellation"
-    );
+    assert_eq!(product.stock_quantity, 10);
 }
 
-/// A pending order that is still "young" (within the timeout window) must be left alone.
 #[tokio::test]
 #[serial_test::serial]
 async fn recent_pending_order_is_not_cancelled() {
@@ -69,6 +62,7 @@ async fn recent_pending_order_is_not_cancelled() {
                 quantity: 1,
             }],
         },
+        None,
     )
     .await
     .unwrap();
@@ -78,14 +72,13 @@ async fn recent_pending_order_is_not_cancelled() {
         .unwrap();
     assert!(cancelled_ids.is_empty());
 
-    let order = db::orders::get_order_with_items(&pool, created.order.id)
-        .await
-        .unwrap();
+    let order =
+        db::orders::get_order_with_items(&pool, created.order.id, Some(created.access_token))
+            .await
+            .unwrap();
     assert_eq!(order.order.status, OrderStatus::Pending);
 }
 
-/// An order that was paid before the sweeper got to it must never be cancelled, even if it's
-/// old. This guards the re-check-under-lock logic in cancel_stale_pending_orders.
 #[tokio::test]
 #[serial_test::serial]
 async fn paid_order_is_never_cancelled_even_if_old() {
@@ -101,6 +94,7 @@ async fn paid_order_is_never_cancelled_even_if_old() {
                 quantity: 2,
             }],
         },
+        None,
     )
     .await
     .unwrap();
@@ -120,14 +114,12 @@ async fn paid_order_is_never_cancelled_even_if_old() {
         .unwrap();
     assert!(cancelled_ids.is_empty());
 
-    let order = db::orders::get_order_with_items(&pool, created.order.id)
-        .await
-        .unwrap();
+    let order =
+        db::orders::get_order_with_items(&pool, created.order.id, Some(created.access_token))
+            .await
+            .unwrap();
     assert_eq!(order.order.status, OrderStatus::Paid);
 
     let product = db::products::get_product(&pool, product_id).await.unwrap();
-    assert_eq!(
-        product.stock_quantity, 3,
-        "stock decremented at order creation must remain (payment does not change stock)"
-    );
+    assert_eq!(product.stock_quantity, 3);
 }
