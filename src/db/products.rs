@@ -200,7 +200,9 @@ pub async fn update_product(
 
     validate_product_fields(&name, &sku, price, stock_quantity, low_stock_threshold)?;
 
-    let stock_delta = stock_quantity.wrapping_sub(current.stock_quantity);
+    let stock_delta = stock_quantity
+        .checked_sub(current.stock_quantity)
+        .ok_or_else(|| AppError::Validation("stock calculation overflow".into()))?;
 
     let product = sqlx::query_as::<_, Product>(
         r#"

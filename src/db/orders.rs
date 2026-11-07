@@ -23,8 +23,13 @@ pub async fn create_order(
     req: CreateOrderRequest,
     idempotency_key: Option<String>,
 ) -> AppResult<CreateOrderResponse> {
-    if req.customer_email.trim().is_empty() {
+    let email = req.customer_email.trim();
+    if email.is_empty() {
         return Err(AppError::Validation("customer_email is required".into()));
+    }
+    // Basic email validation: must have an '@' and a '.' after the '@'
+    if !email.contains('@') || !email.split('@').nth(1).unwrap_or("").contains('.') {
+        return Err(AppError::Validation("invalid customer_email format".into()));
     }
     if req.items.is_empty() {
         return Err(AppError::Validation(
@@ -140,24 +145,24 @@ pub async fn create_order(
     if let Some(ref key) = idempotency_key {
         let fp = fingerprint(&req);
         let email_lower = req.customer_email.trim().to_lowercase();
-        sqlx::query("INSERT INTO idempotency_keys (key, order_id, customer_email, request_fingerprint) VALUES ($1, $2, $3, $4)")
+        let res = sqlx::query("INSERT INTO idempotency_keys (key, order_id, customer_email, request_fingerprint) VALUES ($1, $2, $3, $4) ON CONFLICT (key) DO NOTHING")
             .bind(key)
             .bind(order.id)
             .bind(email_lower)
             .bind(fp)
             .execute(&mut *tx)
-            .await
-            .map_err(|e| match e {
-                sqlx::Error::Database(ref db_err)
-                    if db_err.code().as_deref() == Some("23505") =>
-                {
-                    AppError::InvalidState(format!(
-                        "concurrent request with the same idempotency key '{}' is in progress; retry shortly",
-                        key
-                    ))
-                }
-                other => AppError::Database(other),
-            })?;
+            .await?;
+
+        if res.rows_affected() == 0 {
+            // Wani request ne ya riga ya saka key din a lokaci guda.
+            // Mu soke wannan order din da muka kirkira, sannan mu dawo da wanda ke akwai.
+            tx.rollback().await?;
+            return load_by_idempotency(pool, key, &req).await?.ok_or_else(|| {
+                AppError::Internal(anyhow::anyhow!(
+                    "Idempotency conflict but original order not found"
+                ))
+            });
+        }
     }
 
     tx.commit().await?;
