@@ -6,13 +6,27 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
 
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "ecommerce_inventory=info,tower_http=info".into()),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .init();
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "ecommerce_inventory=info,tower_http=info".into());
+
+    // Idan LOG_FORMAT=json, sai a yi amfani da structured JSON logging
+    // (yana da mahimmanci ga production monitoring).
+    let use_json = std::env::var("LOG_FORMAT")
+        .unwrap_or_default()
+        .to_lowercase()
+        == "json";
+
+    if use_json {
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(tracing_subscriber::fmt::layer().json())
+            .init();
+    } else {
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(tracing_subscriber::fmt::layer())
+            .init();
+    }
 
     let database_url =
         std::env::var("DATABASE_URL").expect("DATABASE_URL environment variable must be set");

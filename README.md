@@ -20,6 +20,7 @@ Highlights:
 - **Background sweeper** — cancels stale pending orders and restores stock,
   guarded by a Postgres advisory lock (multi-instance safe).
 - **OpenAPI / Swagger UI** — interactive documentation at `/api/docs`.
+- **Structured JSON logging** — set `LOG_FORMAT=json` for machine-readable logs.
 - **Production Docker stack** — Caddy auto-HTTPS, isolated networks,
   `read_only` app FS, resource limits, `/ready` healthchecks.
 

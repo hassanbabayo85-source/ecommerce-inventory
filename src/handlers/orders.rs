@@ -11,7 +11,13 @@ use axum::{
 };
 use uuid::Uuid;
 
-#[utoipa::path(post, path = "/api/orders", request_body = CreateOrderRequest, responses((status = 201, body = CreateOrderResponse)), tag = "ecommerce")]
+#[utoipa::path(
+    post, path = "/api/orders",
+    params(("Idempotency-Key" = Option<String>, Header, description = "Optional idempotency key to prevent duplicate orders")),
+    request_body = CreateOrderRequest,
+    responses((status = 201, body = CreateOrderResponse)),
+    tag = "ecommerce"
+)]
 pub async fn create_order(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -22,7 +28,15 @@ pub async fn create_order(
     Ok((StatusCode::CREATED, Json(resp)))
 }
 
-#[utoipa::path(get, path = "/api/orders/{id}", params(("id" = Uuid, Path, description = "Order ID")), responses((status = 200, body = OrderWithItems)), tag = "ecommerce")]
+#[utoipa::path(
+    get, path = "/api/orders/{id}",
+    params(
+        ("id" = Uuid, Path, description = "Order ID"),
+        ("X-Order-Token" = Option<Uuid>, Header, description = "Order access token")
+    ),
+    responses((status = 200, body = OrderWithItems)),
+    tag = "ecommerce"
+)]
 pub async fn get_order(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
