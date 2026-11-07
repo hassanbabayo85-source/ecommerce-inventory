@@ -16,21 +16,21 @@ pub fn public_routes() -> Router<AppState> {
         .route("/ready", get(health::ready))
         .route("/api/products", get(products::list_products))
         .route("/api/products/low-stock", get(products::low_stock_report))
-        .route("/api/products/:id", get(products::get_product))
+        .route("/api/products/{id}", get(products::get_product))
         .route("/api/orders", post(orders::create_order))
-        .route("/api/orders/:id", get(orders::get_order))
+        .route("/api/orders/{id}", get(orders::get_order))
 }
 
 pub fn admin_routes() -> Router<AppState> {
     Router::new()
         .route("/api/products", post(products::create_product))
         .route(
-            "/api/products/:id",
+            "/api/products/{id}",
             put(products::update_product).delete(products::delete_product),
         )
-        .route("/api/orders/:id/pay", post(orders::pay_order))
+        .route("/api/orders/{id}/pay", post(orders::pay_order))
         .route(
-            "/api/products/:id/movements",
+            "/api/products/{id}/movements",
             get(inventory::list_product_movements),
         )
         .route(
