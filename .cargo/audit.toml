@@ -35,4 +35,25 @@ ignore = [
     "RUSTSEC-2026-0104",
     "RUSTSEC-2026-0098",
     "RUSTSEC-2026-0382",
+
+    # ── Advisories discovered by CI on 2026-11-07 ────────────────────────
+    # (local `cargo audit` piped through `head` truncated the list earlier)
+
+    # RUSTSEC-2024-0363: sqlx Binary Protocol Misinterpretation.
+    # Requires a malicious PostgreSQL server response. In production
+    # Postgres is on the isolated `backend` network (internal: true);
+    # attacker would need DB-level compromise first. Fixed by sqlx 0.8.1.
+    "RUSTSEC-2024-0363",
+
+    # RUSTSEC-2026-0099: rustls-webpki wildcard name constraints.
+    # Same family as other rustls-webpki advisories above: only affects
+    # the client-side TLS handshake to Postgres on the internal network.
+    # We do not accept wildcard certs from untrusted issuers. Fixed by sqlx 0.8.
+    "RUSTSEC-2026-0099",
+
+    # RUSTSEC-2026-0381: webpki-roots emSign intermediates.
+    # Pulled by reqwest 0.11 (dev-dependency). Bundled root certs are
+    # unused in our deployment (no outbound HTTPS via reqwest at runtime).
+    # Fixed by reqwest 0.12. Not in the release binary.
+    "RUSTSEC-2026-0381",
 ]

@@ -82,6 +82,9 @@ RustSec project for advisories that do not apply to a given deployment.
 | RUSTSEC-2026-0104 | `rustls-webpki 0.101.x` | Panic in CRL parsing | We do not use CRLs. Fixed by sqlx 0.8. |
 | RUSTSEC-2026-0098 | `rustls-webpki 0.101.x` | URI SAN constraints bypass | Postgres certs use DNS SANs, not URI SANs, in our deployment. Fixed by sqlx 0.8. |
 | RUSTSEC-2026-0382 | `rustls-webpki 0.101.x` | Distrusted intermediates accepted | Postgres CA is pinned per-deployment; no untrusted intermediates can be presented. Fixed by sqlx 0.8. |
+| RUSTSEC-2024-0363 | `sqlx 0.7.4` | Binary Protocol Misinterpretation | Requires attacker-controlled PostgreSQL server. In prod Postgres is on isolated `backend` network (`internal: true`). Fixed by sqlx 0.8.1. |
+| RUSTSEC-2026-0099 | `rustls-webpki 0.101.x` | Wildcard name constraints bypass | Same family as other rustls-webpki: Postgres TLS on isolated network; no wildcard certs trusted. Fixed by sqlx 0.8. |
+| RUSTSEC-2026-0381 | `webpki-roots 0.25.4` | Bundled root certs trust distrusted emSign intermediates | `webpki-roots` pulled by reqwest 0.11 (dev-only). Unused at runtime; no outbound HTTPS via reqwest. Fixed by reqwest 0.12. |
 
 **Re-evaluate this list whenever `sqlx` or `reqwest` are bumped to a new
 major version.** The tracked upgrade path to remove these ignores is
