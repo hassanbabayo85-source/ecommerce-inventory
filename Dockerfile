@@ -28,7 +28,7 @@ RUN mkdir -p src && \
 # `|| true` is intentional: the stub binary fails because lib.rs is empty,
 # but the dependency artifacts are already compiled and cached. Only used
 # to prime the cache layer — real errors surface in the next stage.
-RUN cargo build --release --locked --bin ecommerce_inventory || true
+RUN cargo build --release --locked --bin ecommerce_inventory
 
 # ---- Stage 2: build real binary ----
 FROM chef AS builder

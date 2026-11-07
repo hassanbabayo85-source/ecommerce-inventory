@@ -8,6 +8,16 @@ use sqlx::PgPool;
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
+fn fingerprint(req: &CreateOrderRequest) -> String {
+    let mut items: Vec<_> = req
+        .items
+        .iter()
+        .map(|i| (i.product_id.to_string(), i.quantity))
+        .collect();
+    items.sort();
+    format!("{}|{:?}", req.customer_email.trim().to_lowercase(), items)
+}
+
 pub async fn create_order(
     pool: &PgPool,
     req: CreateOrderRequest,
@@ -31,7 +41,7 @@ pub async fn create_order(
     }
 
     if let Some(ref key) = idempotency_key {
-        if let Some(existing) = load_by_idempotency(pool, key).await? {
+        if let Some(existing) = load_by_idempotency(pool, key, &req).await? {
             return Ok(existing);
         }
     }
@@ -128,9 +138,13 @@ pub async fn create_order(
     }
 
     if let Some(ref key) = idempotency_key {
-        sqlx::query("INSERT INTO idempotency_keys (key, order_id) VALUES ($1, $2)")
+        let fp = fingerprint(&req);
+        let email_lower = req.customer_email.trim().to_lowercase();
+        sqlx::query("INSERT INTO idempotency_keys (key, order_id, customer_email, request_fingerprint) VALUES ($1, $2, $3, $4)")
             .bind(key)
             .bind(order.id)
+            .bind(email_lower)
+            .bind(fp)
             .execute(&mut *tx)
             .await
             .map_err(|e| match e {
@@ -155,16 +169,28 @@ pub async fn create_order(
     })
 }
 
-async fn load_by_idempotency(pool: &PgPool, key: &str) -> AppResult<Option<CreateOrderResponse>> {
-    let order_id: Option<(Uuid,)> =
-        sqlx::query_as("SELECT order_id FROM idempotency_keys WHERE key = $1")
-            .bind(key)
-            .fetch_optional(pool)
-            .await?;
+async fn load_by_idempotency(
+    pool: &PgPool,
+    key: &str,
+    req: &CreateOrderRequest,
+) -> AppResult<Option<CreateOrderResponse>> {
+    let existing: Option<(Uuid, String, String)> = sqlx::query_as(
+        "SELECT order_id, customer_email, request_fingerprint FROM idempotency_keys WHERE key = $1",
+    )
+    .bind(key)
+    .fetch_optional(pool)
+    .await?;
 
-    let Some((oid,)) = order_id else {
+    let Some((oid, stored_email, stored_fp)) = existing else {
         return Ok(None);
     };
+
+    let current_fp = fingerprint(req);
+    if stored_email != req.customer_email.trim().to_lowercase() || stored_fp != current_fp {
+        return Err(AppError::InvalidState(
+            "Idempotency-Key reused with a different payload or customer".into(),
+        ));
+    }
 
     let order = sqlx::query_as::<_, Order>(
         r#"

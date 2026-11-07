@@ -23,6 +23,8 @@ thiserror = "1"
 anyhow = "1"
 
 subtle = "2"
+sha2 = "0.10"
+tower_governor = "0.4"
 
 [dev-dependencies]
 serial_test = "3"

@@ -10,6 +10,7 @@ use axum::{
     Router,
 };
 use sqlx::PgPool;
+use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
@@ -30,10 +31,21 @@ pub fn build_app(pool: PgPool, admin_api_key: String, cors_origins: Vec<String>)
         auth::require_admin,
     ));
 
+    let governor_conf = Box::new(
+        GovernorConfigBuilder::default()
+            .per_second(50)
+            .burst_size(100)
+            .finish()
+            .unwrap(),
+    );
+
     Router::new()
         .merge(handlers::public_routes())
         .merge(admin)
         .layer(TraceLayer::new_for_http())
+        .layer(GovernorLayer {
+            config: governor_conf.into(),
+        })
         .layer(build_cors_layer(&cors_origins))
         .with_state(state)
 }

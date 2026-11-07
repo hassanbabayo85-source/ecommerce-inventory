@@ -69,9 +69,23 @@ jobs:
       - run: cargo audit
 
   docker:
-    name: Docker build
+    name: Docker build & smoke test
     runs-on: ubuntu-latest
     needs: [fmt, clippy, test]
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: ecommerce_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
@@ -87,12 +101,11 @@ jobs:
       - name: Smoke-test /health
         run: |
           docker run -d --rm --name ci-app \
-            -e DATABASE_URL="postgres://x:x@127.0.0.1:5432/x" \
+            -e DATABASE_URL="postgres://postgres:postgres@localhost:5432/ecommerce_test" \
             -e ADMIN_API_KEY="test-admin-key-1234567890" \
             -e BIND_ADDR="0.0.0.0:8080" \
-            -p 18080:8080 \
+            --network host \
             ecommerce-inventory:ci
-          # The app will fail DB connect; we only assert the image starts.
-          sleep 3
-          docker logs ci-app | head -20 || true
-          docker stop ci-app || true
+          sleep 5
+          curl -f http://localhost:8080/health || exit 1
+          docker stop ci-app
