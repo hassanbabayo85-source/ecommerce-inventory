@@ -244,10 +244,11 @@ pub async fn delete_product(pool: &PgPool, id: Uuid) -> AppResult<()> {
     let mut tx = pool.begin().await?;
 
     // Lock the product row to prevent concurrent order creation
-    let exists: Option<(Uuid,)> = sqlx::query_as("SELECT id FROM products WHERE id = $1 FOR UPDATE")
-        .bind(id)
-        .fetch_optional(&mut *tx)
-        .await?;
+    let exists: Option<(Uuid,)> =
+        sqlx::query_as("SELECT id FROM products WHERE id = $1 FOR UPDATE")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
     if exists.is_none() {
         return Err(AppError::NotFound(format!("product {id} not found")));
     }
@@ -264,10 +265,11 @@ pub async fn delete_product(pool: &PgPool, id: Uuid) -> AppResult<()> {
         )));
     }
 
-    let movements: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM inventory_movements WHERE product_id = $1")
-        .bind(id)
-        .fetch_one(&mut *tx)
-        .await?;
+    let movements: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM inventory_movements WHERE product_id = $1")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?;
     if movements.0 > 0 {
         return Err(AppError::InvalidState(format!(
             "product {id} cannot be deleted: has {} inventory movement(s); audit trail must be preserved",

@@ -19,7 +19,7 @@ async fn concurrent_requests_with_same_key_create_one_order() {
         let pool = pool.clone();
         let key = key.clone();
         let order_ids = order_ids.clone();
-    
+
         handles.push(tokio::spawn(async move {
             let req = CreateOrderRequest {
                 customer_email: "concurrent@example.com".into(),

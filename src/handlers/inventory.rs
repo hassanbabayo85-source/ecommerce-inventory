@@ -1,3 +1,9 @@
+use crate::{
+    db,
+    errors::AppResult,
+    models::inventory::{AdjustStockRequest, InventoryMovement, MovementsQuery},
+    AppState,
+};
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
@@ -5,12 +11,7 @@ use axum::{
 };
 use uuid::Uuid;
 
-use crate::db;
-use crate::errors::AppResult;
-use crate::models::inventory::{AdjustStockRequest, InventoryMovement, MovementsQuery};
-use crate::AppState;
-
-/// GET /api/products/:id/movements (admin)
+#[utoipa::path(get, path = "/api/products/{id}/movements", params(("id" = Uuid, Path, description = "Product ID"), MovementsQuery), responses((status = 200, body = Vec<InventoryMovement>)), tag = "ecommerce", security(("api_key" = [])))]
 pub async fn list_product_movements(
     State(state): State<AppState>,
     Path(product_id): Path<Uuid>,
@@ -23,7 +24,7 @@ pub async fn list_product_movements(
     Ok(Json(rows))
 }
 
-/// GET /api/inventory/movements (admin)
+#[utoipa::path(get, path = "/api/inventory/movements", params(MovementsQuery), responses((status = 200, body = Vec<InventoryMovement>)), tag = "ecommerce", security(("api_key" = [])))]
 pub async fn list_all_movements(
     State(state): State<AppState>,
     Query(params): Query<MovementsQuery>,
@@ -34,7 +35,7 @@ pub async fn list_all_movements(
     Ok(Json(rows))
 }
 
-/// POST /api/inventory/adjustments (admin)
+#[utoipa::path(post, path = "/api/inventory/adjustments", request_body = AdjustStockRequest, responses((status = 201, body = InventoryMovement)), tag = "ecommerce", security(("api_key" = [])))]
 pub async fn adjust_stock(
     State(state): State<AppState>,
     Json(req): Json<AdjustStockRequest>,

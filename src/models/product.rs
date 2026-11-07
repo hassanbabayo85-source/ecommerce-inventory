@@ -3,7 +3,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, utoipa::ToSchema)]
 pub struct Product {
     pub id: Uuid,
     pub name: String,
@@ -15,7 +15,7 @@ pub struct Product {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateProductRequest {
     pub name: String,
     pub sku: String,
@@ -24,7 +24,7 @@ pub struct CreateProductRequest {
     pub low_stock_threshold: Option<i32>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct UpdateProductRequest {
     pub name: Option<String>,
     pub sku: Option<String>,

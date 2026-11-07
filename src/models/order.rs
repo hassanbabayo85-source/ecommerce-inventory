@@ -3,7 +3,9 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type, utoipa::ToSchema,
+)]
 #[sqlx(type_name = "order_status", rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
 pub enum OrderStatus {
@@ -24,7 +26,7 @@ impl std::fmt::Display for OrderStatus {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, utoipa::ToSchema)]
 pub struct Order {
     pub id: Uuid,
     pub customer_email: String,
@@ -32,14 +34,11 @@ pub struct Order {
     pub total_amount: Decimal,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-
-    /// Per-order opaque access token. NEVER serialized to JSON via this field —
-    /// it is returned exactly once via `CreateOrderResponse::access_token`.
     #[serde(skip)]
     pub access_token: Uuid,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, utoipa::ToSchema)]
 pub struct OrderItem {
     pub id: Uuid,
     pub order_id: Uuid,
@@ -48,35 +47,28 @@ pub struct OrderItem {
     pub unit_price: Decimal,
 }
 
-/// Full order + items. `#[serde(flatten)]` keeps the JSON shape flat:
-/// `{ id, customer_email, status, total_amount, ..., items: [...] }`.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct OrderWithItems {
     #[serde(flatten)]
     pub order: Order,
     pub items: Vec<OrderItem>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateOrderRequest {
     pub customer_email: String,
     pub items: Vec<CreateOrderItem>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateOrderItem {
     pub product_id: Uuid,
     pub quantity: i32,
 }
 
-/// Backwards-compatible alias — older code/tests used this name.
 pub type OrderItemRequest = CreateOrderItem;
 
-/// Response body for POST /api/orders.
-///
-/// `access_token` is returned exactly ONCE; clients must store it and send
-/// it as `X-Order-Token` on subsequent GET /api/orders/:id requests.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct CreateOrderResponse {
     #[serde(flatten)]
     pub order: Order,

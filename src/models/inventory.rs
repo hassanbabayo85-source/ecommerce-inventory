@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, utoipa::ToSchema)]
 pub struct InventoryMovement {
     pub id: Uuid,
     pub product_id: Uuid,
@@ -13,14 +13,14 @@ pub struct InventoryMovement {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct AdjustStockRequest {
     pub product_id: Uuid,
     pub change: i32,
     pub note: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
 pub struct MovementsQuery {
     pub limit: Option<i64>,
     pub offset: Option<i64>,

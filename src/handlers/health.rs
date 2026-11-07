@@ -1,20 +1,13 @@
-//! Liveness and readiness probes.
-//!
-//! - `/health` is a **liveness** check: the process is up and the router
-//!   responds. Used by Docker's HEALTHCHECK for restart-on-crash.
-//! - `/ready`  is a **readiness** check: the app can serve traffic right now.
-//!   Currently it pings the DB with `SELECT 1`. Used by orchestrators
-//!   (Kubernetes, load balancers) to decide when to send traffic.
-
+use crate::AppState;
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use serde_json::json;
 
-use crate::AppState;
-
+#[utoipa::path(get, path = "/health", responses((status = 200, description = "Liveness probe")))]
 pub async fn health() -> &'static str {
     "ok"
 }
 
+#[utoipa::path(get, path = "/ready", responses((status = 200, description = "Readiness probe"), (status = 503, description = "DB unreachable")))]
 pub async fn ready(State(state): State<AppState>) -> impl IntoResponse {
     match sqlx::query("SELECT 1").execute(&state.pool).await {
         Ok(_) => (StatusCode::OK, Json(json!({"status": "ready"}))),

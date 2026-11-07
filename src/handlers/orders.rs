@@ -1,3 +1,9 @@
+use crate::{
+    db,
+    errors::{AppError, AppResult},
+    models::order::{CreateOrderRequest, CreateOrderResponse, Order, OrderWithItems},
+    AppState,
+};
 use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
@@ -5,14 +11,7 @@ use axum::{
 };
 use uuid::Uuid;
 
-use crate::db;
-use crate::errors::{AppError, AppResult};
-use crate::models::order::{CreateOrderRequest, CreateOrderResponse, Order, OrderWithItems};
-use crate::AppState;
-
-/// POST /api/orders
-/// Optional header: `Idempotency-Key` (C6).
-/// Response includes `access_token` — clients MUST store it (C1).
+#[utoipa::path(post, path = "/api/orders", request_body = CreateOrderRequest, responses((status = 201, body = CreateOrderResponse)), tag = "ecommerce")]
 pub async fn create_order(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -23,8 +22,7 @@ pub async fn create_order(
     Ok((StatusCode::CREATED, Json(resp)))
 }
 
-/// GET /api/orders/:id
-/// Required header: `X-Order-Token` matching the token from creation (C1).
+#[utoipa::path(get, path = "/api/orders/{id}", params(("id" = Uuid, Path, description = "Order ID")), responses((status = 200, body = OrderWithItems)), tag = "ecommerce")]
 pub async fn get_order(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -35,7 +33,7 @@ pub async fn get_order(
     Ok(Json(order))
 }
 
-/// POST /api/orders/:id/pay
+#[utoipa::path(post, path = "/api/orders/{id}/pay", params(("id" = Uuid, Path, description = "Order ID")), responses((status = 200, body = Order)), tag = "ecommerce", security(("api_key" = [])))]
 pub async fn pay_order(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,

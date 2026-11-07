@@ -13,11 +13,70 @@ use sqlx::PgPool;
 use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
+use utoipa::OpenApi;
+use utoipa_swagger_ui::SwaggerUi;
 
 #[derive(Clone)]
 pub struct AppState {
     pub pool: PgPool,
     pub admin_api_key: String,
+}
+
+#[derive(OpenApi)]
+#[openapi(
+    paths(
+        crate::handlers::health::health,
+        crate::handlers::health::ready,
+        crate::handlers::products::list_products,
+        crate::handlers::products::get_product,
+        crate::handlers::products::create_product,
+        crate::handlers::products::update_product,
+        crate::handlers::products::delete_product,
+        crate::handlers::products::low_stock_report,
+        crate::handlers::orders::create_order,
+        crate::handlers::orders::get_order,
+        crate::handlers::orders::pay_order,
+        crate::handlers::inventory::list_product_movements,
+        crate::handlers::inventory::list_all_movements,
+        crate::handlers::inventory::adjust_stock,
+    ),
+    components(
+        schemas(
+            crate::models::product::Product,
+            crate::models::product::CreateProductRequest,
+            crate::models::product::UpdateProductRequest,
+            crate::models::order::Order,
+            crate::models::order::OrderItem,
+            crate::models::order::OrderStatus,
+            crate::models::order::CreateOrderRequest,
+            crate::models::order::CreateOrderItem,
+            crate::models::order::OrderWithItems,
+            crate::models::order::CreateOrderResponse,
+            crate::models::inventory::InventoryMovement,
+            crate::models::inventory::AdjustStockRequest,
+        )
+    ),
+    tags(
+        (name = "ecommerce", description = "E-commerce Inventory API")
+    ),
+    modifiers(&SecurityAddon)
+)]
+pub struct ApiDoc;
+
+struct SecurityAddon;
+
+impl utoipa::Modify for SecurityAddon {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        let components = openapi.components.as_mut().unwrap();
+        components.add_security_scheme(
+            "api_key",
+            utoipa::openapi::security::SecurityScheme::ApiKey(
+                utoipa::openapi::security::ApiKey::Header(
+                    utoipa::openapi::security::ApiKeyValue::new("X-API-Key"),
+                ),
+            ),
+        );
+    }
 }
 
 pub fn build_app(pool: PgPool, admin_api_key: String, cors_origins: Vec<String>) -> Router {
@@ -40,22 +99,15 @@ pub fn build_app(pool: PgPool, admin_api_key: String, cors_origins: Vec<String>)
     );
 
     Router::new()
+        .merge(SwaggerUi::new("/api/docs").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .merge(handlers::public_routes())
         .merge(admin)
         .layer(TraceLayer::new_for_http())
-        .layer(GovernorLayer {
-            config: governor_conf.into(),
-        })
+        .layer(GovernorLayer::new(governor_conf))
         .layer(build_cors_layer(&cors_origins))
         .with_state(state)
 }
 
-/// Builds a CORS layer from a list of allowed origins.
-///
-/// Fail-safe behaviour (C2):
-///   - `APP_ENV=production` (or `CORS_STRICT=true`) + empty/malformed
-///     CORS_ALLOWED_ORIGINS → **panics at startup**.
-///   - Otherwise (dev) → falls back to permissive with a loud warning.
 fn build_cors_layer(origins: &[String]) -> CorsLayer {
     let strict = std::env::var("APP_ENV")
         .map(|v| v.eq_ignore_ascii_case("production") || v.eq_ignore_ascii_case("prod"))

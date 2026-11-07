@@ -4,9 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-axum = { version = "0.7", features = ["json"] }
+axum = { version = "0.8", features = ["json"] }
 tokio = { version = "1", features = ["full"] }
-tower-http = { version = "0.5", features = ["trace", "cors"] }
+tower-http = { version = "0.6", features = ["trace", "cors"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
@@ -24,7 +24,9 @@ anyhow = "1"
 
 subtle = "2"
 sha2 = "0.10"
-tower_governor = "0.4"
+tower_governor = "0.8"
+utoipa = { version = "5", features = ["axum_extras", "uuid", "chrono", "decimal"] }
+utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
 
 [dev-dependencies]
 serial_test = "3"
