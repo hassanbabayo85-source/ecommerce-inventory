@@ -1,0 +1,38 @@
+# cargo-audit configuration.
+#
+# Each ignored advisory has a comment explaining WHY it is safe to ignore
+# in this project. Re-evaluate on every major dependency bump.
+
+[advisories]
+ignore = [
+    # ── rsa: Marvin Attack (RSA decryption timing) ────────────────────────
+    # No upstream fix exists at time of writing.
+    # We perform NO RSA decryption anywhere in this codebase; the crate is
+    # a transitive dev-only dependency and its decrypt paths are unused.
+    "RUSTSEC-2023-0071",
+
+    # ── h2: Unbounded empty DATA frames (DoS) ─────────────────────────────
+    # h2 0.3.x is pulled in by `reqwest 0.11`, which is a DEV-dependency.
+    # Not compiled into the release binary. Fixed by reqwest 0.12 (h2 0.4).
+    "RUSTSEC-2026-0258",
+
+    # ── rustls 0.21.x: TLS client advisories ──────────────────────────────
+    # Pulled in by `sqlx` (runtime-tokio-rustls) and `reqwest` (dev-only).
+    # In production, PostgreSQL is on the isolated `backend` Docker network
+    # (internal: true) and never reached over the internet. TLS to Postgres
+    # is defense-in-depth, not a security boundary, in our deployment.
+    # The advisories require an active MITM on the Postgres link or
+    # Debug-logging of TLS session values — neither applies here.
+    # Fixed by sqlx 0.8 (which uses rustls 0.23).
+    "RUSTSEC-2026-0349",
+    "RUSTSEC-2026-0346",
+
+    # ── rustls-webpki 0.101.x: certificate validation advisories ──────────
+    # Same reasoning as above: affects only the client-side TLS handshake
+    # to PostgreSQL. We do not use CRLs; Postgres certs use DNS SANs
+    # (not URI SANs); the Postgres CA is pinned per-deployment so no
+    # untrusted intermediates can be presented. Fixed by sqlx 0.8.
+    "RUSTSEC-2026-0104",
+    "RUSTSEC-2026-0098",
+    "RUSTSEC-2026-0382",
+]

@@ -64,3 +64,25 @@ Out of scope:
 - Caddy sets HSTS, X-Content-Type-Options, X-Frame-Options,
   Referrer-Policy, Permissions-Policy.
 - Dependency scanning via `cargo audit` in CI.
+
+
+## Known transitive advisories (accepted risk)
+
+`cargo audit` reports the following RUSTSEC advisories against transitive
+dependencies. Each is explicitly ignored in `.cargo/audit.toml` with a
+written justification. This is the standard practice recommended by the
+RustSec project for advisories that do not apply to a given deployment.
+
+| Advisory | Crate | Impact | Why accepted |
+|----------|-------|--------|--------------|
+| RUSTSEC-2023-0071 | `rsa 0.9.10` | Marvin Attack (RSA decryption timing) | No upstream fix. We perform no RSA decryption; the crate is a transitive dev-only dependency. |
+| RUSTSEC-2026-0258 | `h2 0.3.x` | Unbounded empty DATA frames (DoS) | `h2` is pulled by `reqwest 0.11`, a **dev-dependency** only. Not in the release binary. Fixed by upgrading reqwest to 0.12. |
+| RUSTSEC-2026-0349 | `rustls 0.21.x` | Downgrade attack on TLS handshake | Requires active MITM. In production PostgreSQL is on the isolated `backend` Docker network (`internal: true`). Fixed by sqlx 0.8. |
+| RUSTSEC-2026-0346 | `rustls 0.21.x` | Debug impl exposes TLS secrets | We never Debug-print TLS session values. Fixed by sqlx 0.8. |
+| RUSTSEC-2026-0104 | `rustls-webpki 0.101.x` | Panic in CRL parsing | We do not use CRLs. Fixed by sqlx 0.8. |
+| RUSTSEC-2026-0098 | `rustls-webpki 0.101.x` | URI SAN constraints bypass | Postgres certs use DNS SANs, not URI SANs, in our deployment. Fixed by sqlx 0.8. |
+| RUSTSEC-2026-0382 | `rustls-webpki 0.101.x` | Distrusted intermediates accepted | Postgres CA is pinned per-deployment; no untrusted intermediates can be presented. Fixed by sqlx 0.8. |
+
+**Re-evaluate this list whenever `sqlx` or `reqwest` are bumped to a new
+major version.** The tracked upgrade path to remove these ignores is
+sqlx 0.7 -> 0.8 and reqwest 0.11 -> 0.12.
