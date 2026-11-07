@@ -6,7 +6,10 @@ pub mod jobs;
 pub mod models;
 
 use axum::{
+    extract::{MatchedPath, Request},
     http::{HeaderValue, Method},
+    middleware::Next,
+    response::Response,
     Router,
 };
 use sqlx::PgPool;
@@ -20,6 +23,7 @@ use utoipa_swagger_ui::SwaggerUi;
 pub struct AppState {
     pub pool: PgPool,
     pub admin_api_key: String,
+    pub prometheus_handle: Option<metrics_exporter_prometheus::PrometheusHandle>,
 }
 
 #[derive(OpenApi)]
@@ -27,6 +31,7 @@ pub struct AppState {
     paths(
         crate::handlers::health::health,
         crate::handlers::health::ready,
+        crate::handlers::health::metrics,
         crate::handlers::products::list_products,
         crate::handlers::products::get_product,
         crate::handlers::products::create_product,
@@ -67,22 +72,56 @@ struct SecurityAddon;
 
 impl utoipa::Modify for SecurityAddon {
     fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
-        let components = openapi.components.as_mut().unwrap();
-        components.add_security_scheme(
-            "api_key",
-            utoipa::openapi::security::SecurityScheme::ApiKey(
-                utoipa::openapi::security::ApiKey::Header(
-                    utoipa::openapi::security::ApiKeyValue::new("X-API-Key"),
+        if let Some(components) = openapi.components.as_mut() {
+            components.add_security_scheme(
+                "api_key",
+                utoipa::openapi::security::SecurityScheme::ApiKey(
+                    utoipa::openapi::security::ApiKey::Header(
+                        utoipa::openapi::security::ApiKeyValue::new("X-API-Key"),
+                    ),
                 ),
-            ),
-        );
+            );
+        }
     }
 }
 
-pub fn build_app(pool: PgPool, admin_api_key: String, cors_origins: Vec<String>) -> Router {
+// Middleware don rikodin HTTP metrics (requests da duration)
+async fn track_metrics(req: Request, next: Next) -> Response {
+    let start = std::time::Instant::now();
+    let path = if let Some(matched_path) = req.extensions().get::<MatchedPath>() {
+        matched_path.as_str().to_owned()
+    } else {
+        req.uri().path().to_owned()
+    };
+    let method = req.method().clone();
+
+    let response = next.run(req).await;
+
+    let latency = start.elapsed().as_secs_f64();
+    let status = response.status().as_u16().to_string();
+
+    let labels = [
+        ("method", method.to_string()),
+        ("path", path),
+        ("status", status),
+    ];
+
+    metrics::counter!("http_requests_total", &labels).increment(1);
+    metrics::histogram!("http_request_duration_seconds", &labels).record(latency);
+
+    response
+}
+
+pub fn build_app(
+    pool: PgPool,
+    admin_api_key: String,
+    cors_origins: Vec<String>,
+    prometheus_handle: Option<metrics_exporter_prometheus::PrometheusHandle>,
+) -> Router {
     let state = AppState {
         pool,
         admin_api_key,
+        prometheus_handle,
     };
 
     let admin = handlers::admin_routes().route_layer(axum::middleware::from_fn_with_state(
@@ -102,6 +141,7 @@ pub fn build_app(pool: PgPool, admin_api_key: String, cors_origins: Vec<String>)
         .merge(SwaggerUi::new("/api/docs").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .merge(handlers::public_routes())
         .merge(admin)
+        .layer(axum::middleware::from_fn(track_metrics))
         .layer(TraceLayer::new_for_http())
         .layer(GovernorLayer::new(governor_conf))
         .layer(build_cors_layer(&cors_origins))

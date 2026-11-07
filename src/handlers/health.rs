@@ -20,3 +20,15 @@ pub async fn ready(State(state): State<AppState>) -> impl IntoResponse {
         }
     }
 }
+
+#[utoipa::path(get, path = "/metrics", responses((status = 200, description = "Prometheus metrics"), (status = 503, description = "Metrics not initialized")))]
+pub async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
+    match state.prometheus_handle {
+        Some(ref handle) => (StatusCode::OK, handle.render()).into_response(),
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Prometheus metrics not initialized",
+        )
+            .into_response(),
+    }
+}

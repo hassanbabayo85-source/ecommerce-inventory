@@ -14,6 +14,7 @@ pub fn public_routes() -> Router<AppState> {
     Router::new()
         .route("/health", get(health::health))
         .route("/ready", get(health::ready))
+        .route("/metrics", get(health::metrics))
         .route("/api/products", get(products::list_products))
         .route("/api/products/low-stock", get(products::low_stock_report))
         .route("/api/products/{id}", get(products::get_product))

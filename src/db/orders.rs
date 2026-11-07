@@ -154,6 +154,7 @@ pub async fn create_order(
             .await?;
 
         if res.rows_affected() == 0 {
+            metrics::counter!("orders_failed_total").increment(1);
             // Wani request ne ya riga ya saka key din a lokaci guda.
             // Mu soke wannan order din da muka kirkira, sannan mu dawo da wanda ke akwai.
             tx.rollback().await?;
@@ -166,6 +167,7 @@ pub async fn create_order(
     }
 
     tx.commit().await?;
+    metrics::counter!("orders_created_total").increment(1);
 
     Ok(CreateOrderResponse {
         access_token: order.access_token,

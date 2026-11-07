@@ -4,8 +4,11 @@
 use ecommerce_inventory::{build_app, db, models::product::CreateProductRequest, run_migrations};
 use rust_decimal::Decimal;
 use sqlx::PgPool;
+use std::sync::OnceLock;
 
 pub const TEST_API_KEY: &str = "test-admin-key-1234567890";
+
+static PROMETHEUS_HANDLE: OnceLock<metrics_exporter_prometheus::PrometheusHandle> = OnceLock::new();
 
 pub async fn setup_pool() -> PgPool {
     let url = std::env::var("TEST_DATABASE_URL")
@@ -19,8 +22,6 @@ pub async fn setup_pool() -> PgPool {
         .await
         .expect("failed to run migrations");
 
-    // CASCADE also clears idempotency_keys (FK → orders) and
-    // inventory_movements (FK → products).
     sqlx::query(
         "TRUNCATE TABLE inventory_movements, idempotency_keys, order_items, orders, products RESTART IDENTITY CASCADE",
     )
@@ -32,7 +33,16 @@ pub async fn setup_pool() -> PgPool {
 }
 
 pub fn app(pool: PgPool) -> axum::Router {
-    build_app(pool, TEST_API_KEY.to_string(), vec![])
+    // Amfani da OnceLock don kada mu yi ƙoƙarin girka Prometheus sau biyu (wanda zai haifar da kuskure).
+    let handle = PROMETHEUS_HANDLE
+        .get_or_init(|| {
+            metrics_exporter_prometheus::PrometheusBuilder::new()
+                .install_recorder()
+                .unwrap()
+        })
+        .clone();
+
+    build_app(pool, TEST_API_KEY.to_string(), vec![], Some(handle))
 }
 
 pub async fn seed_product(

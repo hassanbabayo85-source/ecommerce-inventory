@@ -49,6 +49,10 @@ async fn main() -> anyhow::Result<()> {
         .map(String::from)
         .collect();
 
+    let prometheus_handle = metrics_exporter_prometheus::PrometheusBuilder::new()
+        .install_recorder()
+        .expect("failed to install Prometheus recorder");
+
     let pool = db::create_pool(&database_url).await?;
     tracing::info!("database pool created");
 
@@ -58,7 +62,7 @@ async fn main() -> anyhow::Result<()> {
     jobs::cancel_pending::spawn(pool.clone());
     tracing::info!("background stale-order sweeper started (runs every 60s)");
 
-    let app = build_app(pool, admin_api_key, cors_origins);
+    let app = build_app(pool, admin_api_key, cors_origins, Some(prometheus_handle));
 
     let addr: SocketAddr = bind_addr.parse().expect("invalid BIND_ADDR");
     tracing::info!(%addr, "starting server");

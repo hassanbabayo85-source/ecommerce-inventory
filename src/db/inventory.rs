@@ -138,5 +138,6 @@ pub async fn adjust_stock(
     .await?;
 
     tx.commit().await?;
+    metrics::counter!("inventory_adjustments_total").increment(1);
     Ok(movement)
 }

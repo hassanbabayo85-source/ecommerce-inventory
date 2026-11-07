@@ -21,6 +21,7 @@ Highlights:
   guarded by a Postgres advisory lock (multi-instance safe).
 - **OpenAPI / Swagger UI** — interactive documentation at `/api/docs`.
 - **Structured JSON logging** — set `LOG_FORMAT=json` for machine-readable logs.
+- **Prometheus metrics** — `/metrics` endpoint with HTTP and business metrics.
 - **Production Docker stack** — Caddy auto-HTTPS, isolated networks,
   `read_only` app FS, resource limits, `/ready` healthchecks.
 
@@ -44,7 +45,7 @@ Highlights:
     docker compose up --build -d
     docker compose logs -f app
 
-App: <http://localhost:8080/health> · <http://localhost:8080/ready>
+App: <http://localhost:8080/health> · <http://localhost:8080/ready> · <http://localhost:8080/metrics> (Prometheus metrics)
 
 **Interactive API Docs**: <http://localhost:8080/api/docs> (Swagger UI)
 
