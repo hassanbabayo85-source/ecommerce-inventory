@@ -19,6 +19,7 @@ Highlights:
   reconcilable against current stock (`SUM(movements) == stock`).
 - **Background sweeper** — cancels stale pending orders and restores stock,
   guarded by a Postgres advisory lock (multi-instance safe).
+- **OpenAPI / Swagger UI** — interactive documentation at `/api/docs`.
 - **Production Docker stack** — Caddy auto-HTTPS, isolated networks,
   `read_only` app FS, resource limits, `/ready` healthchecks.
 
@@ -43,6 +44,8 @@ Highlights:
     docker compose logs -f app
 
 App: <http://localhost:8080/health> · <http://localhost:8080/ready>
+
+**Interactive API Docs**: <http://localhost:8080/api/docs> (Swagger UI)
 
 ### Option 2 — Local (no Docker)
 
