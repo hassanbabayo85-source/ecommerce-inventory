@@ -241,10 +241,21 @@ pub async fn update_product(
 }
 
 pub async fn delete_product(pool: &PgPool, id: Uuid) -> AppResult<()> {
-    // C4: refuse deletion if referenced by any order_item.
+    let mut tx = pool.begin().await?;
+
+    // Lock the product row to prevent concurrent order creation
+    let exists: Option<(Uuid,)> = sqlx::query_as("SELECT id FROM products WHERE id = $1 FOR UPDATE")
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    if exists.is_none() {
+        return Err(AppError::NotFound(format!("product {id} not found")));
+    }
+
+    // Check references inside the transaction
     let refs: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM order_items WHERE product_id = $1")
         .bind(id)
-        .fetch_one(pool)
+        .fetch_one(&mut *tx)
         .await?;
     if refs.0 > 0 {
         return Err(AppError::InvalidState(format!(
@@ -253,12 +264,10 @@ pub async fn delete_product(pool: &PgPool, id: Uuid) -> AppResult<()> {
         )));
     }
 
-    // Phase 3: refuse deletion if any audit history exists.
-    let movements: (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM inventory_movements WHERE product_id = $1")
-            .bind(id)
-            .fetch_one(pool)
-            .await?;
+    let movements: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM inventory_movements WHERE product_id = $1")
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
     if movements.0 > 0 {
         return Err(AppError::InvalidState(format!(
             "product {id} cannot be deleted: has {} inventory movement(s); audit trail must be preserved",
@@ -266,15 +275,24 @@ pub async fn delete_product(pool: &PgPool, id: Uuid) -> AppResult<()> {
         )));
     }
 
-    let result = sqlx::query("DELETE FROM products WHERE id = $1")
+    let delete_res = sqlx::query("DELETE FROM products WHERE id = $1")
         .bind(id)
-        .execute(pool)
-        .await?;
+        .execute(&mut *tx)
+        .await;
 
-    if result.rows_affected() == 0 {
-        return Err(AppError::NotFound(format!("product {id} not found")));
+    // Map concurrent FK violation to 409 Conflict
+    if let Err(e) = delete_res {
+        if let sqlx::Error::Database(ref db_err) = e {
+            if db_err.code().as_deref() == Some("23503") {
+                return Err(AppError::InvalidState(format!(
+                    "product {id} cannot be deleted: concurrent reference detected"
+                )));
+            }
+        }
+        return Err(AppError::Database(e));
     }
 
+    tx.commit().await?;
     Ok(())
 }
 

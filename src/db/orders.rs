@@ -374,13 +374,25 @@ async fn do_sweep(pool: &PgPool, timeout_minutes: i64) -> AppResult<Vec<Uuid>> {
                 .fetch_optional(&mut *tx)
                 .await?;
 
-            sqlx::query(
+            let update_res = sqlx::query(
                 "UPDATE products SET stock_quantity = stock_quantity + $1, updated_at = now() WHERE id = $2",
             )
             .bind(quantity)
             .bind(product_id)
             .execute(&mut *tx)
-            .await?;
+            .await;
+
+            if let Err(e) = update_res {
+                if let sqlx::Error::Database(ref db_err) = e {
+                    if db_err.code().as_deref() == Some("22003") {
+                        return Err(AppError::Validation(format!(
+                            "stock restoration overflow for product {}",
+                            product_id
+                        )));
+                    }
+                }
+                return Err(AppError::Database(e));
+            }
 
             // Phase 3: ledger entry — same transaction as stock restoration.
             sqlx::query(
